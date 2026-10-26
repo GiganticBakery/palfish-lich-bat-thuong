@@ -1,0 +1,9 @@
+{
+  "date_window_days_back": 14,
+  "date_window_days_ahead": 40,
+  "gap_minutes": 60,
+  "min_cluster": 2,
+  "google_sheet_id": "",
+  "_note": "watchlist để trống ở repo public — dữ liệu khách nạp qua secret WATCHLIST_JSON",
+  "watchlist": []
+}
