@@ -42,6 +42,7 @@ import httpx
 # Tái dùng engine — KHÔNG sửa watch_schedule.py
 from watch_schedule import (
     VN_TZ,
+    APPOINT_URL,
     ACTION_STATUS,
     get_auth_headers,
     fetch_lessons,
@@ -333,6 +334,26 @@ def write_sheet(svc, sheet_id: str, tabs: dict, kept: list[dict]):
 
 
 # ---------------------------------------------------------------------------
+# Token CRM sống rất ngắn (~1') → probe 1 phát để biết token còn dùng được không
+# (single-shot, không retry) trước khi quét hàng loạt.
+# ---------------------------------------------------------------------------
+def _probe_token(client, headers, uid: int) -> bool:
+    today = dt.datetime.now(VN_TZ).date()
+    body = {
+        "stuid": int(uid), "kids": [], "action": "", "country_code": "VN",
+        "local_zone_name": "Asia/Ho_Chi_Minh",
+        "local_begin_time_desc": f"{today} 00:00:00",
+        "local_end_time_desc": f"{today} 23:59:59",
+        "limit": 1, "offset": 0, "zone_name": "Asia/Saigon", "h_lc": "vi",
+    }
+    try:
+        r = client.post(APPOINT_URL, headers=headers, json=body, timeout=30)
+        return r.json().get("ret") == 1
+    except Exception:
+        return False
+
+
+# ---------------------------------------------------------------------------
 def main():
     sheet_id = os.getenv("GOOGLE_SHEET_ID_FIRST", "").strip()
     if not sheet_id:
@@ -367,47 +388,69 @@ def main():
     scan.update(new_uids)
 
     # --- Lớp 2: quét CRM CHỈ các uid trong (pool ∪ bé mới) ---
-    headers = get_auth_headers()
     crm_cfg = {"date_window_days_back": CRM_WINDOW_BACK_DAYS,
                "date_window_days_ahead": CRM_WINDOW_AHEAD_DAYS}
+    batch_size = int(os.getenv("FIRST_LESSON_BATCH") or "25")
+
     new_pool: dict[str, dict] = {}
     kept: list[dict] = []
     stale_cut = now - dt.timedelta(days=pool_max_days)
-    to_scan = {u: p for u, p in scan.items() if p >= stale_cut}
+    to_scan = [(u, p) for u, p in scan.items() if p >= stale_cut]
     dropped = len(scan) - len(to_scan)
     if dropped:
         print(f"[drop] {dropped} bé tồn >{pool_max_days} ngày, bỏ pool", flush=True)
-    print(f"[scan] quét CRM {len(to_scan)} bé (song song {concurrency} luồng)", flush=True)
+    print(f"[scan] quét CRM {len(to_scan)} bé (lô {batch_size}, song song "
+          f"{concurrency}, đọc lại token mỗi lô)", flush=True)
 
-    def _scan_one(client, uid, purchase):
+    def _scan_one(client, hdrs, uid, purchase):
         try:
-            items = fetch_lessons(client, headers, int(uid), crm_cfg)
+            items = fetch_lessons(client, hdrs, int(uid), crm_cfg)
             return uid, purchase, items, None
         except Exception as exc:
             return uid, purchase, None, exc
 
+    def _keep(uid, purchase, items):
+        if count_completed_after(items, purchase) >= 1:
+            return  # đã học buổi đầu -> rút khỏi pool
+        ten = (pool.get(uid, {}).get("ten")
+               or next((((it.get("student") or {}).get("name") or "")
+                        for it in items if (it.get("student") or {}).get("name")), ""))
+        new_pool[uid] = {"ten": ten, "purchase": purchase}
+        kept.append({"uid": uid, "ten": ten, "purchase": purchase,
+                     "today_rows": todays_lessons(items, today)})
+
     done_n = 0
     with httpx.Client() as client:
-        with ThreadPoolExecutor(max_workers=concurrency) as ex:
-            futs = [ex.submit(_scan_one, client, u, p) for u, p in to_scan.items()]
-            for fut in as_completed(futs):
-                uid, purchase, items, exc = fut.result()
-                done_n += 1
-                if done_n % 50 == 0:
-                    print(f"[scan] {done_n}/{len(to_scan)}", flush=True)
-                if exc is not None:  # lỗi -> giữ nguyên trong pool, bỏ qua lần này
-                    print(f"[warn] uid={uid} lỗi lấy lịch: {exc}", flush=True)
-                    if uid in pool:
-                        new_pool[uid] = pool[uid]
-                    continue
-                if count_completed_after(items, purchase) >= 1:
-                    continue  # đã học buổi đầu -> rút khỏi pool
-                ten = (pool.get(uid, {}).get("ten")
-                       or next((((it.get("student") or {}).get("name") or "")
-                                for it in items if (it.get("student") or {}).get("name")), ""))
-                new_pool[uid] = {"ten": ten, "purchase": purchase}
-                kept.append({"uid": uid, "ten": ten, "purchase": purchase,
-                             "today_rows": todays_lessons(items, today)})
+        # Token CRM sống ~1' -> đọc lại mỗi lô. Probe trước: token chết thì dừng
+        # ngay (khỏi grind), kèm thông báo rõ.
+        headers = get_auth_headers()
+        if to_scan and not _probe_token(client, headers, to_scan[0][0]):
+            headers = get_auth_headers()  # thử đọc lại 1 lần (token vừa xoay)
+            if not _probe_token(client, headers, to_scan[0][0]):
+                sys.exit("[ERR] Token CRM đang hết hạn (ret!=1). Chạy lại khi CS "
+                         "đang mở CRM — token tự làm mới mỗi phút.")
+
+        for bi in range(0, len(to_scan), batch_size):
+            if bi > 0:
+                headers = get_auth_headers()  # token tươi cho mỗi lô
+            batch = to_scan[bi:bi + batch_size]
+            fail_in_batch = 0
+            with ThreadPoolExecutor(max_workers=concurrency) as ex:
+                futs = [ex.submit(_scan_one, client, headers, u, p) for u, p in batch]
+                for fut in as_completed(futs):
+                    uid, purchase, items, exc = fut.result()
+                    done_n += 1
+                    if exc is not None:  # lỗi -> giữ nguyên pool, thử lại lần sau
+                        fail_in_batch += 1
+                        if uid in pool:
+                            new_pool[uid] = pool[uid]
+                        continue
+                    _keep(uid, purchase, items)
+            print(f"[scan] {done_n}/{len(to_scan)} (lô lỗi {fail_in_batch}/{len(batch)})",
+                  flush=True)
+            if bi == 0 and fail_in_batch == len(batch):  # lô đầu chết sạch -> dừng
+                sys.exit("[ERR] Toàn bộ lô đầu lỗi ret=-1 — token CRM hết hạn hoặc bị "
+                         "chặn. Chạy lại khi CS đang mở CRM.")
 
     kept_today = sum(1 for k in kept if k["today_rows"])
     print(f"[kept] pool còn {len(new_pool)} bé · {kept_today} bé có buổi hôm nay")
