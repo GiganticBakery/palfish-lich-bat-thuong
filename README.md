@@ -89,3 +89,50 @@ export GOOGLE_SERVICE_ACCOUNT_JSON='D:\...\pf-gmv-manager-xxxx.json'
 export GOOGLE_SHEET_ID='...'
 python watch_schedule.py
 ```
+
+---
+
+# Job 2 — Học viên mới cần chăm trước buổi học đầu tiên (chị Huyền)
+
+`watch_first_lesson.py` + workflow `first-lesson.yml` — **dùng chung** reader lịch
+CRM + token + sheets service của `watch_schedule.py` (import, không sửa engine).
+Sheet **riêng**, không liên quan sheet lịch bất thường.
+
+## Cách hoạt động (2 lớp cho nhẹ tải)
+
+```
+Supabase so_doanh_thu  →  lọc "học viên mới"  ─┐
+                                               ├─ quét CRM CHỈ (pool ∪ bé mới)
+tab ẩn _pool (bé đang chờ, lần chạy trước)  ───┘      → đếm buổi đã học (action==2)
+   → bé 0 buổi học + mua gần đây giữ trong pool · bé đã học buổi đầu rút khỏi pool
+   → ghi tab "Cần chăm hôm nay" + "Danh sách chờ"
+```
+
+- **Học viên mới** = mọi đơn của 1 uid rơi vào cùng 1 lần mua (1 đơn, hoặc nhiều
+  bé mua cùng lúc trong `FIRST_LESSON_SAME_BUY_MINUTES` phút). Có đơn ở lần mua
+  khác (tái ký) → loại. Nguồn `so_doanh_thu` đã gồm cả team **HCM (Online)**.
+- **Chưa học buổi đầu** = đếm buổi `action==2` ("Đã kết thúc lớp") có ngày học >
+  thời điểm mua = 0. **Vắng (101) không tính** là đã học.
+- **Pool** (tab ẩn `_pool`): giữ danh sách bé đang chờ qua các lần chạy nên mỗi
+  lần chỉ quét CRM nhóm nhỏ, không quét lại toàn bộ (~522) học viên mới.
+
+## Thiết lập (làm tay 1 lần)
+
+1. Tạo 1 Google Sheet **mới** (tách khỏi sheet lịch bất thường), share Editor cho
+   SA `sodoanhthu-import@pf-gmv-manager.iam.gserviceaccount.com`.
+2. Secret `GOOGLE_SHEET_ID_FIRST` = ID sheet đó. (Các secret `SUPABASE_*`,
+   `CRM_ENCRYPT_KEY`, `GOOGLE_SA_JSON` dùng chung với job 1.)
+3. *(tuỳ chọn)* Repo Variables: `FIRST_LESSON_ARRIVAL_DAYS` (mặc định 3),
+   `FIRST_LESSON_SAME_BUY_MINUTES` (60), `FIRST_LESSON_POOL_MAX_DAYS` (45).
+4. **Seed lần đầu:** Actions → `first-lesson-care` → Run workflow → `seed_days` = 45
+   (gom hết bé đã mua 45 ngày qua còn chưa học vào pool). Các lần sau chạy tự động.
+
+## Lịch
+
+Cron `first-lesson.yml`: **mỗi 30 phút, 08:30–22:00 VN** (sau 22h ngừng).
+
+## Test
+
+```bash
+python test_first_lesson.py   # 9 test logic lọc (không cần mạng)
+```
