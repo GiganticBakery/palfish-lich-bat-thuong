@@ -427,8 +427,11 @@ def main():
         if to_scan and not _probe_token(client, headers, to_scan[0][0]):
             headers = get_auth_headers()  # thử đọc lại 1 lần (token vừa xoay)
             if not _probe_token(client, headers, to_scan[0][0]):
-                sys.exit("[ERR] Token CRM đang hết hạn (ret!=1). Chạy lại khi CS "
-                         "đang mở CRM — token tự làm mới mỗi phút.")
+                # Không phải lỗi code — chỉ là token chưa tươi (CS chưa mở CRM).
+                # Kết thúc êm (exit 0) để Actions không báo đỏ; lần chạy sau tự thử lại.
+                print("[skip] Token CRM đang hết hạn — bỏ qua lượt này, chạy lại khi "
+                      "CS đang mở CRM (token tự làm mới mỗi phút).", flush=True)
+                return
 
         for bi in range(0, len(to_scan), batch_size):
             if bi > 0:
@@ -448,9 +451,10 @@ def main():
                     _keep(uid, purchase, items)
             print(f"[scan] {done_n}/{len(to_scan)} (lô lỗi {fail_in_batch}/{len(batch)})",
                   flush=True)
-            if bi == 0 and fail_in_batch == len(batch):  # lô đầu chết sạch -> dừng
-                sys.exit("[ERR] Toàn bộ lô đầu lỗi ret=-1 — token CRM hết hạn hoặc bị "
-                         "chặn. Chạy lại khi CS đang mở CRM.")
+            if bi == 0 and fail_in_batch == len(batch):  # lô đầu chết sạch -> dừng êm
+                print("[skip] Toàn bộ lô đầu lỗi ret=-1 — token CRM hết hạn hoặc bị "
+                      "chặn. Bỏ qua lượt này, chạy lại khi CS đang mở CRM.", flush=True)
+                return
 
     kept_today = sum(1 for k in kept if k["today_rows"])
     print(f"[kept] pool còn {len(new_pool)} bé · {kept_today} bé có buổi hôm nay")
