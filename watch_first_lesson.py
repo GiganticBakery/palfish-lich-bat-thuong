@@ -35,6 +35,7 @@ import re
 import sys
 import datetime as dt
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import httpx
 
@@ -344,6 +345,8 @@ def main():
     arrival_days = max(arrival_days, seed_days)
     # Bé ở pool quá lâu vẫn chưa học -> coi như tồn đọng, rút khỏi pool.
     pool_max_days = int(os.getenv("FIRST_LESSON_POOL_MAX_DAYS") or "45")
+    # Số luồng quét CRM song song (bám cap concurrency backend = 3).
+    concurrency = int(os.getenv("FIRST_LESSON_CONCURRENCY") or "3")
 
     now = dt.datetime.now(VN_TZ)
     today = now.date()
@@ -370,27 +373,41 @@ def main():
     new_pool: dict[str, dict] = {}
     kept: list[dict] = []
     stale_cut = now - dt.timedelta(days=pool_max_days)
-    print(f"[scan] quét CRM {len(scan)} bé")
+    to_scan = {u: p for u, p in scan.items() if p >= stale_cut}
+    dropped = len(scan) - len(to_scan)
+    if dropped:
+        print(f"[drop] {dropped} bé tồn >{pool_max_days} ngày, bỏ pool", flush=True)
+    print(f"[scan] quét CRM {len(to_scan)} bé (song song {concurrency} luồng)", flush=True)
+
+    def _scan_one(client, uid, purchase):
+        try:
+            items = fetch_lessons(client, headers, int(uid), crm_cfg)
+            return uid, purchase, items, None
+        except Exception as exc:
+            return uid, purchase, None, exc
+
+    done_n = 0
     with httpx.Client() as client:
-        for uid, purchase in scan.items():
-            if purchase < stale_cut:  # tồn đọng quá lâu -> bỏ khỏi pool
-                print(f"[drop] uid={uid} tồn >{pool_max_days} ngày, bỏ pool")
-                continue
-            try:
-                items = fetch_lessons(client, headers, int(uid), crm_cfg)
-            except Exception as exc:  # 1 uid lỗi -> giữ nguyên trong pool, bỏ qua lần này
-                print(f"[warn] uid={uid} lỗi lấy lịch: {exc}")
-                if uid in pool:
-                    new_pool[uid] = pool[uid]
-                continue
-            if count_completed_after(items, purchase) >= 1:
-                continue  # đã học buổi đầu -> rút khỏi pool
-            ten = (pool.get(uid, {}).get("ten")
-                   or next((((it.get("student") or {}).get("name") or "")
-                            for it in items if (it.get("student") or {}).get("name")), ""))
-            new_pool[uid] = {"ten": ten, "purchase": purchase}
-            kept.append({"uid": uid, "ten": ten, "purchase": purchase,
-                         "today_rows": todays_lessons(items, today)})
+        with ThreadPoolExecutor(max_workers=concurrency) as ex:
+            futs = [ex.submit(_scan_one, client, u, p) for u, p in to_scan.items()]
+            for fut in as_completed(futs):
+                uid, purchase, items, exc = fut.result()
+                done_n += 1
+                if done_n % 50 == 0:
+                    print(f"[scan] {done_n}/{len(to_scan)}", flush=True)
+                if exc is not None:  # lỗi -> giữ nguyên trong pool, bỏ qua lần này
+                    print(f"[warn] uid={uid} lỗi lấy lịch: {exc}", flush=True)
+                    if uid in pool:
+                        new_pool[uid] = pool[uid]
+                    continue
+                if count_completed_after(items, purchase) >= 1:
+                    continue  # đã học buổi đầu -> rút khỏi pool
+                ten = (pool.get(uid, {}).get("ten")
+                       or next((((it.get("student") or {}).get("name") or "")
+                                for it in items if (it.get("student") or {}).get("name")), ""))
+                new_pool[uid] = {"ten": ten, "purchase": purchase}
+                kept.append({"uid": uid, "ten": ten, "purchase": purchase,
+                             "today_rows": todays_lessons(items, today)})
 
     kept_today = sum(1 for k in kept if k["today_rows"])
     print(f"[kept] pool còn {len(new_pool)} bé · {kept_today} bé có buổi hôm nay")
