@@ -51,11 +51,17 @@ from watch_schedule import (
 
 SHEET_TODAY = "Cần chăm hôm nay"
 SHEET_WAITING = "Danh sách chờ"
-POOL_TAB = "_pool"  # tab ẩn lưu state: bé đang chờ học buổi đầu
+POOL_TAB = "_pool"      # tab ẩn lưu state: bé đang chờ học buổi đầu
+HEALTH_TAB = "_health"  # tab nhật ký mỗi lượt quét (OK/SKIP) — để chẩn đoán
 
-# Cửa sổ quét CRM đủ lùi để thấy mọi buổi kể từ lúc mua (>= lookback mua).
-CRM_WINDOW_BACK_DAYS = 55
-CRM_WINDOW_AHEAD_DAYS = 40
+# Cửa sổ quét CRM. CRM appoint/formal/list TỪ CHỐI (ret=-1) khi khoảng ngày quá
+# rộng — cửa sổ 95 ngày (55+40) làm MỌI request fail, kéo theo "lô đầu lỗi -> skip"
+# và sheet trắng. Thực tế chỉ cần: đủ LÙI để phủ bé tồn lâu nhất trong pool
+# (pool_max_days, mặc định 45) nhằm đếm đúng buổi đã học kể từ lúc mua; và chỉ cần
+# vài ngày TỚI để bắt buổi hôm nay (không cần nhìn xa tương lai). Tổng ~50 ngày,
+# nằm dưới ngưỡng CRM (Job 1 chạy tốt ở ~54 ngày).
+CRM_WINDOW_BACK_DAYS = 48   # phải >= FIRST_LESSON_POOL_MAX_DAYS, nếu không đếm thiếu buổi đã học
+CRM_WINDOW_AHEAD_DAYS = 2
 ACTION_COMPLETED = 2  # "Đã kết thúc lớp" = đã học chính thức
 
 
@@ -211,7 +217,7 @@ def _ensure_tabs(svc, sheet_id: str) -> dict:
     existing = {s["properties"]["title"]: s["properties"]["sheetId"]
                 for s in meta.get("sheets", [])}
     reqs = []
-    for t in (SHEET_TODAY, SHEET_WAITING, POOL_TAB):
+    for t in (SHEET_TODAY, SHEET_WAITING, POOL_TAB, HEALTH_TAB):
         if t not in existing:
             props = {"title": t}
             if t == POOL_TAB:  # tab state -> ẩn khỏi mắt người xem
@@ -255,6 +261,32 @@ def write_pool(svc, sheet_id: str, pool: dict[str, dict]):
     svc.spreadsheets().values().update(
         spreadsheetId=sheet_id, range=f"'{POOL_TAB}'!A1",
         valueInputOption="RAW", body={"values": values}).execute()
+
+
+def write_health(svc, sheet_id: str, status: str, detail: str):
+    """Ghi 1 dòng nhật ký lượt quét vào tab _health (mới nhất trên cùng, giữ 50 dòng).
+
+    Gọi ở MỌI nhánh kết thúc (OK lẫn SKIP) để nhìn sheet là biết tool có chạy không,
+    lần cuối thành công khi nào, vì sao skip — không còn cảnh sheet trắng khó đoán.
+    Lỗi khi ghi _health KHÔNG được làm hỏng lượt chạy.
+    """
+    try:
+        now_vn = dt.datetime.now(VN_TZ).strftime("%Y-%m-%d %H:%M:%S")
+        try:
+            res = svc.spreadsheets().values().get(
+                spreadsheetId=sheet_id, range=f"'{HEALTH_TAB}'!A2:C").execute()
+            old = res.get("values", [])
+        except Exception:
+            old = []
+        header = [["Thời điểm (VN)", "Trạng thái", "Chi tiết"]]
+        rows = ([[now_vn, status, detail]] + old)[:50]
+        svc.spreadsheets().values().batchClear(
+            spreadsheetId=sheet_id, body={"ranges": [f"'{HEALTH_TAB}'!A1:C1000"]}).execute()
+        svc.spreadsheets().values().update(
+            spreadsheetId=sheet_id, range=f"'{HEALTH_TAB}'!A1",
+            valueInputOption="RAW", body={"values": header + rows}).execute()
+    except Exception as exc:  # health là phụ trợ -> không chặn lượt chạy
+        print(f"[warn] ghi _health lỗi (bỏ qua): {exc}", flush=True)
 
 
 def write_sheet(svc, sheet_id: str, tabs: dict, kept: list[dict]):
@@ -388,7 +420,9 @@ def main():
     scan.update(new_uids)
 
     # --- Lớp 2: quét CRM CHỈ các uid trong (pool ∪ bé mới) ---
-    crm_cfg = {"date_window_days_back": CRM_WINDOW_BACK_DAYS,
+    # BACK phải phủ bé tồn lâu nhất (pool_max_days) để đếm đúng buổi đã học kể từ
+    # lúc mua; vẫn giữ tổng cửa sổ hẹp để CRM không trả ret=-1.
+    crm_cfg = {"date_window_days_back": max(CRM_WINDOW_BACK_DAYS, pool_max_days + 3),
                "date_window_days_ahead": CRM_WINDOW_AHEAD_DAYS}
     batch_size = int(os.getenv("FIRST_LESSON_BATCH") or "25")
 
@@ -431,6 +465,9 @@ def main():
                 # Kết thúc êm (exit 0) để Actions không báo đỏ; lần chạy sau tự thử lại.
                 print("[skip] Token CRM đang hết hạn — bỏ qua lượt này, chạy lại khi "
                       "CS đang mở CRM (token tự làm mới mỗi phút).", flush=True)
+                write_health(svc, sheet_id, "SKIP (token)",
+                             "Token CRM hết hạn ngay ở probe — bỏ qua lượt này, tự "
+                             "thử lại khi CS đang mở CRM (token làm mới mỗi phút).")
                 return
 
         for bi in range(0, len(to_scan), batch_size):
@@ -452,14 +489,22 @@ def main():
             print(f"[scan] {done_n}/{len(to_scan)} (lô lỗi {fail_in_batch}/{len(batch)})",
                   flush=True)
             if bi == 0 and fail_in_batch == len(batch):  # lô đầu chết sạch -> dừng êm
-                print("[skip] Toàn bộ lô đầu lỗi ret=-1 — token CRM hết hạn hoặc bị "
-                      "chặn. Bỏ qua lượt này, chạy lại khi CS đang mở CRM.", flush=True)
+                print("[skip] Toàn bộ lô đầu lỗi ret=-1 — có thể cửa sổ ngày/limit "
+                      "vượt ngưỡng CRM, hoặc token hết hạn/bị chặn. Bỏ qua lượt này.",
+                      flush=True)
+                write_health(svc, sheet_id, "SKIP (ret=-1)",
+                             f"Cả lô đầu {fail_in_batch}/{len(batch)} bé trả ret=-1 — "
+                             "nghi cửa sổ ngày/limit vượt ngưỡng CRM hoặc token hết hạn. "
+                             "Bỏ qua lượt này.")
                 return
 
     kept_today = sum(1 for k in kept if k["today_rows"])
     print(f"[kept] pool còn {len(new_pool)} bé · {kept_today} bé có buổi hôm nay")
     write_pool(svc, sheet_id, new_pool)
     write_sheet(svc, sheet_id, tabs, kept)
+    write_health(svc, sheet_id, "OK",
+                 f"Quét {len(to_scan)} bé · pool còn {len(new_pool)} đang chờ · "
+                 f"{kept_today} bé có buổi hôm nay.")
     print("[done] Ghi sheet xong.")
 
 
