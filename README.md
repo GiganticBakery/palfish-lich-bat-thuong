@@ -115,6 +115,12 @@ tab ẩn _pool (bé đang chờ, lần chạy trước)  ───┘      → �
   thời điểm mua = 0. **Vắng (101) không tính** là đã học.
 - **Pool** (tab ẩn `_pool`): giữ danh sách bé đang chờ qua các lần chạy nên mỗi
   lần chỉ quét CRM nhóm nhỏ, không quét lại toàn bộ (~522) học viên mới.
+- **SĐT + GVCN** (2 cột trên cả 2 tab): tra per-UID từ CRM —
+  `leads/leadsinfo/get` → GVCN = `leads_info.head_teacher.name` (CS phụ trách,
+  **KHÁC** `sale` = NV bán hàng); `leads/leadsphone/get` → SĐT đầy đủ
+  (`data.ent.phone`; SĐT trong leadsinfo bị che nên không dùng). Cache ở tab ẩn
+  `_profile` (uid, gvcn, sdt) → mỗi lượt chỉ tra bé còn thiếu, tối đa
+  `FIRST_LESSON_PROFILE_LIMIT`/lượt.
 
 ## Thiết lập (làm tay 1 lần)
 
@@ -123,7 +129,8 @@ tab ẩn _pool (bé đang chờ, lần chạy trước)  ───┘      → �
 2. Secret `GOOGLE_SHEET_ID_FIRST` = ID sheet đó. (Các secret `SUPABASE_*`,
    `CRM_ENCRYPT_KEY`, `GOOGLE_SA_JSON` dùng chung với job 1.)
 3. *(tuỳ chọn)* Repo Variables: `FIRST_LESSON_ARRIVAL_DAYS` (mặc định 3),
-   `FIRST_LESSON_SAME_BUY_MINUTES` (60), `FIRST_LESSON_POOL_MAX_DAYS` (45).
+   `FIRST_LESSON_SAME_BUY_MINUTES` (60), `FIRST_LESSON_POOL_MAX_DAYS` (45),
+   `FIRST_LESSON_PROFILE_LIMIT` (150 — số bé tra SĐT+GVCN mỗi lượt).
 4. **Seed lần đầu:** Actions → `first-lesson-care` → Run workflow → `seed_days` = 45
    (gom hết bé đã mua 45 ngày qua còn chưa học vào pool). Các lần sau chạy tự động.
 

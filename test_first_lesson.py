@@ -9,6 +9,9 @@ from watch_first_lesson import (
     todays_lessons,
     _parse_pay_time,
     _clean_uid,
+    fetch_profile,
+    LEADSINFO_URL,
+    LEADSPHONE_URL,
 )
 
 NOW = dt.datetime(2026, 10, 26, 12, 0, tzinfo=VN_TZ)
@@ -97,6 +100,54 @@ def test_todays_lessons():
     ]
     rows = todays_lessons(items, today)
     assert [r["hhmm"] for r in rows] == ["15:00", "17:00"]  # sắp theo giờ
+
+
+# --- fetch_profile: parse GVCN + SĐT từ shape thật của CRM (không đụng mạng) ---
+class _Resp:
+    def __init__(self, payload):
+        self._p = payload
+
+    def json(self):
+        return self._p
+
+
+class _FakeClient:
+    """Giả client: trả đúng shape leadsinfo/get và leadsphone/get đã bắt từ HAR."""
+    def __init__(self, info=None, phone=None):
+        self._info = info
+        self._phone = phone
+
+    def post(self, url, headers=None, json=None, timeout=None):
+        if url == LEADSINFO_URL:
+            return _Resp(self._info)
+        if url == LEADSPHONE_URL:
+            return _Resp(self._phone)
+        raise AssertionError(f"url lạ: {url}")
+
+
+_INFO_OK = {"ret": 1, "data": {"ent": {"leads_info": {
+    "head_teacher": {"name": "Ellie Advisor"},   # = GVCN
+    "sale": {"name": "Pham Hong Hanh"},           # = NV bán hàng (phải BỎ)
+    "user": {"phone": "84-886****88"},            # SĐT bị che -> không dùng
+}}}}
+_PHONE_OK = {"ret": 1, "data": {"ent": {"phone": "84-946224065"}}}  # số đầy đủ
+
+
+def test_fetch_profile_gvcn_and_phone():
+    out = fetch_profile(_FakeClient(_INFO_OK, _PHONE_OK), {}, 3321114530)
+    assert out == {"gvcn": "Ellie Advisor", "sdt": "84-946224065"}, out
+
+
+def test_fetch_profile_phone_fail_keeps_gvcn():
+    # leadsphone lỗi (ret!=1) -> vẫn giữ GVCN, SĐT rỗng (lượt sau tra lại)
+    out = fetch_profile(_FakeClient(_INFO_OK, {"ret": -1}), {}, 1)
+    assert out == {"gvcn": "Ellie Advisor", "sdt": ""}, out
+
+
+def test_fetch_profile_info_fail_returns_none():
+    # leadsinfo lỗi (token) -> None, không cache, thử lại lượt sau
+    out = fetch_profile(_FakeClient({"ret": -1}, _PHONE_OK), {}, 1)
+    assert out is None, out
 
 
 def run():
