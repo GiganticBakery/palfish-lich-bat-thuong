@@ -33,6 +33,7 @@ from __future__ import annotations
 import os
 import re
 import sys
+import time
 import datetime as dt
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -355,16 +356,53 @@ def write_health(svc, sheet_id: str, status: str, detail: str):
         print(f"[warn] ghi _health lỗi (bỏ qua): {exc}", flush=True)
 
 
+# 2 cột cuối CỦA CS (tự điền) — tool GIỮ NGUYÊN theo UID qua mỗi lượt, không ghi đè.
+CS_COLS = ["Trạng thái CS", "Ghi chú CS"]
+
+
+def read_cs_notes(svc, sheet_id: str, tab: str, data_row1: int,
+                  uid_col: int, cs_col0: int) -> dict[str, list]:
+    """Đọc 2 cột CS tự điền hiện có -> {uid: [trạng_thái, ghi_chú]} để ghi lại.
+
+    data_row1 = dòng (1-based) bắt đầu data; uid_col/cs_col0 = chỉ số cột (0-based).
+    Nhờ neo theo UID nên ghi chú luôn theo đúng bé dù dòng sắp xếp lại.
+    """
+    try:
+        res = svc.spreadsheets().values().get(
+            spreadsheetId=sheet_id, range=f"'{tab}'!A{data_row1}:Z").execute()
+    except Exception:
+        return {}
+    out: dict[str, list] = {}
+    for row in res.get("values", []):
+        uid = _clean_uid(row[uid_col]) if len(row) > uid_col else None
+        if not uid:
+            continue
+        st = row[cs_col0] if len(row) > cs_col0 else ""
+        nt = row[cs_col0 + 1] if len(row) > cs_col0 + 1 else ""
+        if st or nt:
+            out[uid] = [st, nt]
+    return out
+
+
 def write_sheet(svc, sheet_id: str, tabs: dict, kept: list[dict], profiles: dict[str, dict]):
     """kept: [{uid, ten, purchase, today_rows}] — bé mới chưa học buổi nào.
     profiles: {uid: {gvcn, sdt}} — bổ sung GVCN (CS phụ trách) + SĐT phụ huynh."""
     now_vn = dt.datetime.now(VN_TZ).strftime("%Y-%m-%d %H:%M:%S")
+
+    # giữ ghi chú CS hiện có (neo theo UID) trước khi clear + ghi lại
+    # Cần chăm hôm nay: data từ dòng 5, UID cột B(1), cột CS = I,J (8,9)
+    # Danh sách chờ:    data từ dòng 2, UID cột B(1), cột CS = H,I (7,8)
+    today_cs = read_cs_notes(svc, sheet_id, SHEET_TODAY, 5, 1, 8)
+    wait_cs = read_cs_notes(svc, sheet_id, SHEET_WAITING, 2, 1, 7)
 
     def _sdt(uid):
         return (profiles.get(uid) or {}).get("sdt", "")
 
     def _gvcn(uid):
         return (profiles.get(uid) or {}).get("gvcn", "")
+
+    def _cs(notes, uid):
+        return notes.get(uid, ["", ""])
 
     with_today = [k for k in kept if k["today_rows"]]
 
@@ -375,25 +413,29 @@ def write_sheet(svc, sheet_id: str, tabs: dict, kept: list[dict], profiles: dict
         [banner],
         [f"Cập nhật lúc: {now_vn} (giờ VN) · quét mỗi 30 phút · 8h30–22h"],
         [],
-        ["Tên bé", "UID", "SĐT", "GVCN", "Giờ học (VN)", "GV dạy buổi", "Trạng thái", "Ngày mua"],
+        ["Tên bé", "UID", "SĐT", "GVCN", "Giờ học (VN)", "GV dạy buổi",
+         "Trạng thái", "Ngày mua"] + CS_COLS,
     ]
     for k in sorted(with_today, key=lambda k: k["today_rows"][0]["mins"]):
         gio = ", ".join(r["hhmm"] for r in k["today_rows"])
         gv = " / ".join(sorted({r["teacher"] for r in k["today_rows"] if r["teacher"]}))
         tt = " / ".join(sorted({r["status"] for r in k["today_rows"]}))
         today_values.append([k["ten"], k["uid"], _sdt(k["uid"]), _gvcn(k["uid"]),
-                             gio, gv, tt, k["purchase"].strftime("%Y-%m-%d")])
+                             gio, gv, tt, k["purchase"].strftime("%Y-%m-%d")]
+                            + _cs(today_cs, k["uid"]))
     if not with_today:
         today_values.append(["— không có —"])
 
     # ----- Tab Danh sách chờ (mọi bé mới chưa học) -----
-    wait_header = ["Tên bé", "UID", "SĐT", "GVCN", "Ngày mua", "Có buổi hôm nay?", "Giờ hôm nay"]
+    wait_header = ["Tên bé", "UID", "SĐT", "GVCN", "Ngày mua",
+                   "Có buổi hôm nay?", "Giờ hôm nay"] + CS_COLS
     wait_values = [wait_header]
     for k in sorted(kept, key=lambda k: k["purchase"], reverse=True):
         gio = ", ".join(r["hhmm"] for r in k["today_rows"]) if k["today_rows"] else ""
         wait_values.append([k["ten"], k["uid"], _sdt(k["uid"]), _gvcn(k["uid"]),
                             k["purchase"].strftime("%Y-%m-%d"),
-                            "Có" if k["today_rows"] else "", gio])
+                            "Có" if k["today_rows"] else "", gio]
+                           + _cs(wait_cs, k["uid"]))
     if not kept:
         wait_values.append(["— không có học viên mới chưa học —"])
 
@@ -418,10 +460,10 @@ def write_sheet(svc, sheet_id: str, tabs: dict, kept: list[dict], profiles: dict
         {"unmergeCells": {"range": {"sheetId": tid, "startRowIndex": 0, "endRowIndex": 1,
                                     "startColumnIndex": 0, "endColumnIndex": 26}}},
         {"mergeCells": {"range": {"sheetId": tid, "startRowIndex": 0, "endRowIndex": 1,
-                                  "startColumnIndex": 0, "endColumnIndex": 8}, "mergeType": "MERGE_ALL"}},
+                                  "startColumnIndex": 0, "endColumnIndex": 10}, "mergeType": "MERGE_ALL"}},
         {"repeatCell": {
             "range": {"sheetId": tid, "startRowIndex": 0, "endRowIndex": 1,
-                      "startColumnIndex": 0, "endColumnIndex": 8},
+                      "startColumnIndex": 0, "endColumnIndex": 10},
             "cell": {"userEnteredFormat": {
                 "backgroundColor": blue if with_today else green,
                 "textFormat": {"bold": True, "fontSize": 13},
@@ -597,6 +639,7 @@ def main():
                     profiles[uid] = info
                     if info.get("gvcn") or info.get("sdt"):
                         got += 1
+                time.sleep(0.3)  # leadsphone/get (hiện số) bị rate-limit nếu gọi dồn
         print(f"[profile] lấy được {got}/{len(need)}", flush=True)
     # prune cache về đúng pool hiện tại cho gọn, rồi ghi lại
     profiles = {u: v for u, v in profiles.items() if u in new_pool}

@@ -120,7 +120,12 @@ tab ẩn _pool (bé đang chờ, lần chạy trước)  ───┘      → �
   **KHÁC** `sale` = NV bán hàng); `leads/leadsphone/get` → SĐT đầy đủ
   (`data.ent.phone`; SĐT trong leadsinfo bị che nên không dùng). Cache ở tab ẩn
   `_profile` (uid, gvcn, sdt) → mỗi lượt chỉ tra bé còn thiếu, tối đa
-  `FIRST_LESSON_PROFILE_LIMIT`/lượt.
+  `FIRST_LESSON_PROFILE_LIMIT`/lượt, có `sleep(0.3s)` tránh rate-limit
+  leadsphone. Ô thiếu (leadsphone rỗng lượt này, hoặc bé chưa gán GVCN) tự tra
+  lại lượt sau → đầy dần.
+- **2 cột CS tự điền** ("Trạng thái CS", "Ghi chú CS" — cuối mỗi tab): tool
+  **giữ nguyên theo UID** qua mỗi lượt (đọc lại rồi ghi đúng bé dù dòng sắp xếp
+  lại). CS **chỉ** điền 2 cột này; các cột khác tool tự ghi đè mỗi 30'.
 
 ## Thiết lập (làm tay 1 lần)
 

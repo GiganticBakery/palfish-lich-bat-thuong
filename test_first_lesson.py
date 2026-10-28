@@ -10,6 +10,7 @@ from watch_first_lesson import (
     _parse_pay_time,
     _clean_uid,
     fetch_profile,
+    read_cs_notes,
     LEADSINFO_URL,
     LEADSPHONE_URL,
 )
@@ -148,6 +149,41 @@ def test_fetch_profile_info_fail_returns_none():
     # leadsinfo lỗi (token) -> None, không cache, thử lại lượt sau
     out = fetch_profile(_FakeClient({"ret": -1}, _PHONE_OK), {}, 1)
     assert out is None, out
+
+
+# --- read_cs_notes: giữ ghi chú CS neo theo UID (không đụng mạng) ---
+class _FakeSheets:
+    def __init__(self, values):
+        self._values = values
+
+    def spreadsheets(self):
+        return self
+
+    def values(self):
+        return self
+
+    def get(self, spreadsheetId=None, range=None):
+        return self
+
+    def execute(self):
+        return {"values": self._values}
+
+
+def test_read_cs_notes_anchors_by_uid():
+    # Danh sách chờ: UID cột B(1), cột CS = H,I (7,8)
+    rows = [
+        ["Gold", "3321114530", "84-886110888", "Ellie", "2026-10-27", "Có", "18:00",
+         "Đã gọi", "mẹ bận, hẹn mai"],
+        ["", "3319622906", "84-902569605", "Tran Thu Ha", "2026-10-27", "", "",
+         "Chưa gọi", ""],
+        ["x", "3320033660", "", "", "2026-10-23", "", "", "", ""],  # không note -> bỏ
+        ["x", "84-placeholder", "", "", "", "", "", "Đã gọi", ""],   # uid rác -> bỏ
+    ]
+    out = read_cs_notes(_FakeSheets(rows), "sid", "Danh sách chờ", 2, 1, 7)
+    assert out == {
+        "3321114530": ["Đã gọi", "mẹ bận, hẹn mai"],
+        "3319622906": ["Chưa gọi", ""],
+    }, out
 
 
 def run():
