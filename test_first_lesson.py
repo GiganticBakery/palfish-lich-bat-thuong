@@ -9,7 +9,8 @@ from watch_first_lesson import (
     todays_lessons,
     _parse_pay_time,
     _clean_uid,
-    fetch_profile,
+    fetch_gvcn,
+    fetch_phone,
     read_cs_notes,
     build_log_rows,
     LEADSINFO_URL,
@@ -135,21 +136,23 @@ _INFO_OK = {"ret": 1, "data": {"ent": {"leads_info": {
 _PHONE_OK = {"ret": 1, "data": {"ent": {"phone": "84-946224065"}}}  # số đầy đủ
 
 
-def test_fetch_profile_gvcn_and_phone():
-    out = fetch_profile(_FakeClient(_INFO_OK, _PHONE_OK), {}, 3321114530)
-    assert out == {"gvcn": "Ellie Advisor", "sdt": "84-946224065"}, out
+def test_fetch_gvcn_head_teacher_not_sale():
+    assert fetch_gvcn(_FakeClient(_INFO_OK, None), {}, 3321114530) == "Ellie Advisor"
 
 
-def test_fetch_profile_phone_fail_keeps_gvcn():
-    # leadsphone lỗi (ret!=1) -> vẫn giữ GVCN, SĐT rỗng (lượt sau tra lại)
-    out = fetch_profile(_FakeClient(_INFO_OK, {"ret": -1}), {}, 1)
-    assert out == {"gvcn": "Ellie Advisor", "sdt": ""}, out
+def test_fetch_gvcn_error_returns_none():
+    # leadsinfo lỗi (token) -> None (thử lại lượt sau)
+    assert fetch_gvcn(_FakeClient({"ret": -1}, None), {}, 1) is None
 
 
-def test_fetch_profile_info_fail_returns_none():
-    # leadsinfo lỗi (token) -> None, không cache, thử lại lượt sau
-    out = fetch_profile(_FakeClient({"ret": -1}, _PHONE_OK), {}, 1)
-    assert out is None, out
+def test_fetch_phone_full_number():
+    assert fetch_phone(_FakeClient(None, _PHONE_OK), {}, 1) == "84-946224065"
+
+
+def test_fetch_phone_ratelimited_returns_none():
+    # ret!=1 (giới hạn tần suất) -> None để caller ngắt, KHÁC '' (không có số)
+    assert fetch_phone(_FakeClient(None, {"ret": -1}), {}, 1) is None
+    assert fetch_phone(_FakeClient(None, {"ret": 1, "data": {"ent": {"phone": ""}}}), {}, 1) == ""
 
 
 # --- read_cs_notes: giữ ghi chú CS neo theo UID (không đụng mạng) ---

@@ -279,57 +279,60 @@ def write_pool(svc, sheet_id: str, pool: dict[str, dict]):
 def read_profile(svc, sheet_id: str) -> dict[str, dict]:
     try:
         res = svc.spreadsheets().values().get(
-            spreadsheetId=sheet_id, range=f"'{PROFILE_TAB}'!A2:C").execute()
+            spreadsheetId=sheet_id, range=f"'{PROFILE_TAB}'!A2:D").execute()
     except Exception:
         return {}
     prof: dict[str, dict] = {}
     for row in res.get("values", []):
         uid = _clean_uid(row[0]) if row else None
         if uid:
+            tries = row[3] if len(row) > 3 else "0"
             prof[uid] = {"gvcn": (row[1] if len(row) > 1 else "") or "",
-                         "sdt": (row[2] if len(row) > 2 else "") or ""}
+                         "sdt": (row[2] if len(row) > 2 else "") or "",
+                         "sdt_tries": int(tries) if str(tries).strip().isdigit() else 0}
     return prof
 
 
 def write_profile(svc, sheet_id: str, profiles: dict[str, dict]):
-    values = [["uid", "gvcn", "sdt"]]
+    values = [["uid", "gvcn", "sdt", "sdt_tries"]]
     for uid, v in sorted(profiles.items()):
-        values.append([uid, v.get("gvcn", ""), v.get("sdt", "")])
+        values.append([uid, v.get("gvcn", ""), v.get("sdt", ""), v.get("sdt_tries", 0)])
     svc.spreadsheets().values().batchClear(
-        spreadsheetId=sheet_id, body={"ranges": [f"'{PROFILE_TAB}'!A1:C20000"]}).execute()
+        spreadsheetId=sheet_id, body={"ranges": [f"'{PROFILE_TAB}'!A1:D20000"]}).execute()
     svc.spreadsheets().values().update(
         spreadsheetId=sheet_id, range=f"'{PROFILE_TAB}'!A1",
         valueInputOption="RAW", body={"values": values}).execute()
 
 
-def fetch_profile(client, headers, uid) -> dict | None:
-    """Trả {gvcn, sdt} cho 1 uid, hoặc None nếu không lấy nổi cả GVCN (token lỗi).
-
-    GVCN = leads_info.head_teacher.name (leadsinfo/get) — KHÁC sale (NV bán hàng).
-    SĐT  = data.ent.phone (leadsphone/get, số đầy đủ; leadsinfo che bớt số nên không dùng).
-    SĐT lỗi riêng -> trả gvcn kèm sdt rỗng, lượt sau tự tra lại phần thiếu.
-    """
+def fetch_gvcn(client, headers, uid) -> str | None:
+    """GVCN = leads_info.head_teacher.name (leadsinfo/get) — KHÁC sale (NV bán hàng).
+    Trả tên GVCN ('' nếu chưa gán), hoặc None nếu lỗi/token (thử lại lượt sau)."""
     try:
-        n = int(uid)
-    except Exception:
-        return None
-    body = {"uid": n, "zone_name": "Asia/Saigon", "h_lc": "vi"}
-    try:
+        body = {"uid": int(uid), "zone_name": "Asia/Saigon", "h_lc": "vi"}
         j = client.post(LEADSINFO_URL, headers=headers, json=body, timeout=30).json()
         if j.get("ret") != 1:
             return None
         li = ((j.get("data") or {}).get("ent") or {}).get("leads_info") or {}
-        gvcn = ((li.get("head_teacher") or {}).get("name") or "").strip()
+        return ((li.get("head_teacher") or {}).get("name") or "").strip()
     except Exception:
         return None
-    sdt = ""
+
+
+def fetch_phone(client, headers, uid) -> str | None:
+    """SĐT đầy đủ = data.ent.phone (leadsphone/get; leadsinfo che bớt số nên không dùng).
+
+    Trả '' nếu CRM nói không có số; None nếu lỗi hoặc **bị giới hạn tần suất**
+    ("Too many phone number queries") — caller đếm None để ngắt, tránh gọi dồn
+    làm CRM khoá cổng.
+    """
     try:
+        body = {"uid": int(uid), "zone_name": "Asia/Saigon", "h_lc": "vi"}
         j = client.post(LEADSPHONE_URL, headers=headers, json=body, timeout=30).json()
-        if j.get("ret") == 1:
-            sdt = (((j.get("data") or {}).get("ent") or {}).get("phone") or "").strip()
+        if j.get("ret") != 1:
+            return None
+        return (((j.get("data") or {}).get("ent") or {}).get("phone") or "").strip()
     except Exception:
-        pass
-    return {"gvcn": gvcn, "sdt": sdt}
+        return None
 
 
 def write_health(svc, sheet_id: str, status: str, detail: str):
@@ -689,27 +692,64 @@ def main():
     kept_today = sum(1 for k in kept if k["today_rows"])
     print(f"[kept] pool còn {len(new_pool)} bé · {kept_today} bé có buổi hôm nay")
 
-    # --- Lớp 3: bổ sung SĐT + GVCN cho bé hiển thị (cache _profile, chỉ tra bé thiếu) ---
+    # --- Lớp 3: bổ sung GVCN (leadsinfo) + SĐT (leadsphone) ---
+    # ⚠️ CRM giới hạn tần suất tra SĐT ("Too many phone number queries") và DOẠ
+    # KHOÁ cổng nếu gọi dồn. Nên tra SĐT rất dè:
+    #   - ưu tiên bé CÓ BUỔI HÔM NAY (CS cần gọi ngay), rồi ít bé khác;
+    #   - cap cứng PHONE_LIMIT/lượt, nghỉ 1s/lần, tối đa PHONE_MAX_TRIES lần/bé;
+    #   - gặp giới hạn (None liên tiếp) -> NGẮT tra SĐT lượt này.
+    # GVCN (leadsinfo) nhẹ hơn, tra rộng hơn chút.
     profiles = read_profile(svc, sheet_id)
-    profile_limit = int(os.getenv("FIRST_LESSON_PROFILE_LIMIT") or "150")
-    need = [k["uid"] for k in kept
-            if not (profiles.get(k["uid"], {}).get("gvcn")
-                    and profiles.get(k["uid"], {}).get("sdt"))][:profile_limit]
-    if need:
-        print(f"[profile] tra SĐT+GVCN cho {len(need)} bé còn thiếu", flush=True)
-        got = 0
+    gvcn_limit = int(os.getenv("FIRST_LESSON_GVCN_LIMIT") or "50")
+    phone_limit = int(os.getenv("FIRST_LESSON_PHONE_LIMIT") or "25")
+    phone_max_tries = int(os.getenv("FIRST_LESSON_PHONE_MAX_TRIES") or "5")
+
+    def _p(uid):
+        return profiles.setdefault(uid, {"gvcn": "", "sdt": "", "sdt_tries": 0})
+
+    need_gvcn = [k["uid"] for k in kept if not _p(k["uid"])["gvcn"]][:gvcn_limit]
+    today_uids = [k["uid"] for k in kept if k["today_rows"]]
+    other_uids = [k["uid"] for k in sorted(kept, key=lambda k: k["purchase"], reverse=True)
+                  if not k["today_rows"]]
+    need_phone = [u for u in today_uids + other_uids
+                  if not _p(u)["sdt"] and _p(u).get("sdt_tries", 0) < phone_max_tries][:phone_limit]
+
+    if need_gvcn or need_phone:
+        print(f"[profile] GVCN {len(need_gvcn)} bé · SĐT {len(need_phone)} bé "
+              f"(ưu tiên {len(today_uids)} bé hôm nay)", flush=True)
+        g_ok = p_ok = 0
         with httpx.Client() as pclient:
             hdrs = get_auth_headers()
-            for i, uid in enumerate(need):
+            for i, uid in enumerate(need_gvcn):
                 if i and i % batch_size == 0:
-                    hdrs = get_auth_headers()  # token tươi mỗi lô
-                info = fetch_profile(pclient, hdrs, uid)
-                if info is not None:
-                    profiles[uid] = info
-                    if info.get("gvcn") or info.get("sdt"):
-                        got += 1
-                time.sleep(0.3)  # leadsphone/get (hiện số) bị rate-limit nếu gọi dồn
-        print(f"[profile] lấy được {got}/{len(need)}", flush=True)
+                    hdrs = get_auth_headers()
+                gv = fetch_gvcn(pclient, hdrs, uid)
+                if gv is not None:
+                    _p(uid)["gvcn"] = gv
+                    g_ok += 1 if gv else 0
+                time.sleep(0.3)
+            # đợt SĐT: token tươi, nghỉ lâu, có circuit-breaker
+            hdrs = get_auth_headers()
+            consec_fail = 0
+            for i, uid in enumerate(need_phone):
+                if i and i % batch_size == 0:
+                    hdrs = get_auth_headers()
+                ph = fetch_phone(pclient, hdrs, uid)
+                _p(uid)["sdt_tries"] = _p(uid).get("sdt_tries", 0) + 1
+                if ph is None:
+                    consec_fail += 1
+                    if consec_fail >= 3:
+                        print("[profile] leadsphone lỗi/giới hạn liên tục -> NGẮT tra "
+                              "SĐT lượt này (tránh CRM khoá cổng)", flush=True)
+                        break
+                else:
+                    consec_fail = 0
+                    if ph:
+                        _p(uid)["sdt"] = ph
+                        p_ok += 1
+                time.sleep(1.0)  # leadsphone bị giới hạn mạnh -> nghỉ lâu
+        print(f"[profile] GVCN lấy {g_ok}/{len(need_gvcn)} · SĐT lấy {p_ok}/{len(need_phone)}",
+              flush=True)
     # prune cache về đúng pool hiện tại cho gọn, rồi ghi lại
     profiles = {u: v for u, v in profiles.items() if u in new_pool}
     write_profile(svc, sheet_id, profiles)
