@@ -118,11 +118,14 @@ tab ẩn _pool (bé đang chờ, lần chạy trước)  ───┘      → �
 - **SĐT + GVCN** (2 cột trên cả 2 tab): tra per-UID từ CRM —
   `leads/leadsinfo/get` → GVCN = `leads_info.head_teacher.name` (CS phụ trách,
   **KHÁC** `sale` = NV bán hàng); `leads/leadsphone/get` → SĐT đầy đủ
-  (`data.ent.phone`; SĐT trong leadsinfo bị che nên không dùng). Cache ở tab ẩn
-  `_profile` (uid, gvcn, sdt) → mỗi lượt chỉ tra bé còn thiếu, tối đa
-  `FIRST_LESSON_PROFILE_LIMIT`/lượt, có `sleep(0.3s)` tránh rate-limit
-  leadsphone. Ô thiếu (leadsphone rỗng lượt này, hoặc bé chưa gán GVCN) tự tra
-  lại lượt sau → đầy dần.
+  (`data.ent.phone`; SĐT trong leadsinfo bị che nên không dùng). Cache tab ẩn
+  `_profile` (uid, gvcn, sdt, sdt_tries).
+  - ⚠️ **CRM giới hạn tần suất tra SĐT** ("Too many phone number queries", doạ
+    khoá cổng). Nên tra SĐT dè: ưu tiên bé **có buổi hôm nay**, cap
+    `FIRST_LESSON_PHONE_LIMIT`=25/lượt, nghỉ 1s/lần, tối đa
+    `FIRST_LESSON_PHONE_MAX_TRIES`=5 lần/bé rồi bỏ, và **ngắt ngay** khi CRM
+    báo giới hạn (circuit-breaker). GVCN (leadsinfo, nhẹ hơn) cap
+    `FIRST_LESSON_GVCN_LIMIT`=50/lượt. Ô thiếu tự tra lại lượt sau → đầy dần.
 - **2 cột CS tự điền** ("Trạng thái CS", "Ghi chú CS" — cuối mỗi tab): tool
   **giữ nguyên theo UID** qua mỗi lượt (đọc lại rồi ghi đúng bé dù dòng sắp xếp
   lại). CS **chỉ** điền 2 cột này; các cột khác tool tự ghi đè mỗi 30'.
