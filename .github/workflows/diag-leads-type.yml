@@ -1,0 +1,35 @@
+name: diag-leads-type
+
+# Chẩn đoán 1 lần (chạy tay): lấy leads_type của vài UID để xác nhận luật lọc gia hạn.
+# Không có cron. Truyền UID qua input để không commit data khách vào repo.
+on:
+  workflow_dispatch:
+    inputs:
+      uids_new:
+        description: "UID bé bán mới, cách nhau dấu phẩy"
+        required: false
+        default: ""
+      uids_renewal:
+        description: "UID bé gia hạn, cách nhau dấu phẩy"
+        required: false
+        default: ""
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - run: python -u diag_leads_type.py
+        env:
+          PYTHONUNBUFFERED: "1"
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          CRM_ENCRYPT_KEY: ${{ secrets.CRM_ENCRYPT_KEY }}
+          DIAG_UIDS_NEW: ${{ github.event.inputs.uids_new }}
+          DIAG_UIDS_RENEWAL: ${{ github.event.inputs.uids_renewal }}
