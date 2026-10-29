@@ -110,6 +110,28 @@ def _clean_uid(value) -> str | None:
     return None
 
 
+# loai = cờ gia hạn trong so_doanh_thu. 续费 (6100 đơn) + Resell (297) = tái ký.
+# Bé mới KHÔNG bao giờ có đơn loại này (xác nhận 10/10 UID IH1). Dùng để bịt cả
+# edge case: bé gia hạn mà đơn gốc không có trong sổ thì chính đơn 续费 vẫn bị cờ.
+RENEWAL_LOAI = {"续费", "Resell"}
+
+
+def _is_test_order(o: dict) -> bool:
+    return o.get("is_test") in (True, "true", "True", 1, "1")
+
+
+def renewal_uids_from(orders: list[dict]) -> set[str]:
+    """Tập uid từng có đơn gia hạn (loai ∈ 续费/Resell) -> KHÔNG phải bé mới."""
+    out: set[str] = set()
+    for o in orders:
+        if _is_test_order(o):
+            continue
+        uid = _clean_uid(o.get("uid"))
+        if uid and str(o.get("loai") or "").strip() in RENEWAL_LOAI:
+            out.add(uid)
+    return out
+
+
 def select_new_candidates(
     orders: list[dict],
     now: dt.datetime,
@@ -117,15 +139,17 @@ def select_new_candidates(
     same_buy_minutes: int,
 ) -> dict[str, dt.datetime]:
     """
-    orders: [{uid, pay_time, is_test}] — TOÀN BỘ lịch sử (không chỉ gần đây).
+    orders: [{uid, pay_time, is_test, loai}] — TOÀN BỘ lịch sử (không chỉ gần đây).
     Trả {uid -> purchase_time} cho học viên "mới" mua trong lookback_days.
 
-    "mới" = mọi đơn của uid nằm trong cùng 1 cửa sổ <= same_buy_minutes
-    (1 đơn, hoặc nhiều đơn cùng lần mua). Có đơn ở lần mua khác -> loại.
+    "mới" = (a) KHÔNG có đơn gia hạn nào (loai ∉ 续费/Resell), VÀ
+            (b) mọi đơn nằm trong cùng 1 cửa sổ <= same_buy_minutes
+                (1 đơn, hoặc nhiều đơn cùng lần mua). Có đơn ở lần mua khác -> loại.
     """
+    renewal = renewal_uids_from(orders)
     by_uid: dict[str, list[dt.datetime]] = defaultdict(list)
     for o in orders:
-        if o.get("is_test") in (True, "true", "True", 1, "1"):
+        if _is_test_order(o):
             continue
         uid = _clean_uid(o.get("uid"))
         pt = _parse_pay_time(o.get("pay_time"))
@@ -136,6 +160,8 @@ def select_new_candidates(
     earliest_ok = now - dt.timedelta(days=lookback_days)
     out: dict[str, dt.datetime] = {}
     for uid, times in by_uid.items():
+        if uid in renewal:          # từng gia hạn -> không phải bé mới
+            continue
         times.sort()
         # tất cả đơn trong cùng 1 lần mua?
         if times[-1] - times[0] > window:
@@ -206,7 +232,7 @@ def load_orders() -> list[dict]:
     size = 1000
     while True:
         res = (sb.table("so_doanh_thu")
-               .select("uid, pay_time, is_test")
+               .select("uid, pay_time, is_test, loai")
                .range(page * size, page * size + size - 1)
                .execute())
         batch = res.data or []
@@ -602,12 +628,18 @@ def main():
 
     # --- Lớp 1: nạp bé MỚI mua gần đây, chưa có trong pool ---
     orders = load_orders()
+    renewal = renewal_uids_from(orders)   # uid từng gia hạn (loai 续费/Resell)
     candidates = select_new_candidates(orders, now, arrival_days, same_buy)
     new_uids = {u: p for u, p in candidates.items() if u not in pool}
     print(f"[arrival] {len(new_uids)} bé mới (mua trong {arrival_days} ngày) cần nạp")
 
+    # Dọn cả bé gia hạn LỌT VÀO pool từ lần chạy cũ (trước khi có luật loai).
+    pool_clean = {u: v for u, v in pool.items() if u not in renewal}
+    if len(pool) != len(pool_clean):
+        print(f"[renewal] bỏ {len(pool) - len(pool_clean)} bé gia hạn khỏi pool", flush=True)
+
     # purchase_time cho từng uid cần quét: pool giữ mốc cũ, bé mới lấy từ candidates
-    scan: dict[str, dt.datetime] = {u: v["purchase"] for u, v in pool.items()}
+    scan: dict[str, dt.datetime] = {u: v["purchase"] for u, v in pool_clean.items()}
     scan.update(new_uids)
 
     # --- Lớp 2: quét CRM CHỈ các uid trong (pool ∪ bé mới) ---

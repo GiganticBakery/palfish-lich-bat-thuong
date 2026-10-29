@@ -5,6 +5,7 @@ import datetime as dt
 from watch_first_lesson import (
     VN_TZ,
     select_new_candidates,
+    renewal_uids_from,
     count_completed_after,
     todays_lessons,
     _parse_pay_time,
@@ -65,6 +66,28 @@ def test_old_purchase_excluded():
     orders = [{"uid": "100000004", "pay_time": _pt(1), "is_test": False}]  # 25 ngày? -> trong 45
     out = select_new_candidates(orders, NOW, lookback_days=10, same_buy_minutes=60)
     assert "100000004" not in out  # 26->1 = 25 ngày > 10
+
+
+def test_renewal_loai_excluded():
+    # 1 đơn gần đây NHƯNG loai=续费 -> gia hạn -> LOẠI (bịt edge case đơn gốc thiếu)
+    orders = [{"uid": "100000009", "pay_time": _pt(20), "is_test": False, "loai": "续费"}]
+    assert "100000009" not in select_new_candidates(orders, NOW, 45, 60)
+
+
+def test_new_acquisition_kept():
+    orders = [{"uid": "100000010", "pay_time": _pt(20), "is_test": False, "loai": "广告"}]
+    assert "100000010" in select_new_candidates(orders, NOW, 45, 60)
+
+
+def test_renewal_uids_from_detects_zufei_and_resell():
+    orders = [
+        {"uid": "100000011", "pay_time": _pt(1), "is_test": False, "loai": "广告"},
+        {"uid": "100000011", "pay_time": _pt(20), "is_test": False, "loai": "Resell"},
+        {"uid": "100000012", "pay_time": _pt(20), "is_test": False, "loai": "续费"},
+        {"uid": "100000013", "pay_time": _pt(20), "is_test": False, "loai": "转介绍"},
+        {"uid": "100000014", "pay_time": _pt(20), "is_test": True, "loai": "续费"},  # test -> bỏ
+    ]
+    assert renewal_uids_from(orders) == {"100000011", "100000012"}
 
 
 def test_is_test_skipped():
