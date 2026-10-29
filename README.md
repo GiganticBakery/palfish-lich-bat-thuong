@@ -111,6 +111,9 @@ tab ẩn _pool (bé đang chờ, lần chạy trước)  ───┘      → �
 - **Học viên mới** = mọi đơn của 1 uid rơi vào cùng 1 lần mua (1 đơn, hoặc nhiều
   bé mua cùng lúc trong `FIRST_LESSON_SAME_BUY_MINUTES` phút). Có đơn ở lần mua
   khác (tái ký) → loại. Nguồn `so_doanh_thu` đã gồm cả team **HCM (Online)**.
+  - **Loại gia hạn bằng cột `loai`**: uid có bất kỳ đơn `续费`/`Resell` → loại
+    (xác nhận 10/10 UID IH1: bé mới không bao giờ có 续费). Bịt cả edge case bé
+    gia hạn mà đơn gốc không có trong sổ — vì chính đơn `续费` cũng bị cờ.
 - **Chưa học buổi đầu** = đếm buổi `action==2` ("Đã kết thúc lớp") có ngày học >
   thời điểm mua = 0. **Vắng (101) không tính** là đã học.
 - **Pool** (tab ẩn `_pool`): giữ danh sách bé đang chờ qua các lần chạy nên mỗi
