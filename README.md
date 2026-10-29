@@ -115,6 +115,21 @@ tab ẩn _pool (bé đang chờ, lần chạy trước)  ───┘      → �
   thời điểm mua = 0. **Vắng (101) không tính** là đã học.
 - **Pool** (tab ẩn `_pool`): giữ danh sách bé đang chờ qua các lần chạy nên mỗi
   lần chỉ quét CRM nhóm nhỏ, không quét lại toàn bộ (~522) học viên mới.
+- **SĐT + GVCN** (2 cột trên cả 2 tab): tra per-UID từ CRM —
+  `leads/leadsinfo/get` → GVCN = `leads_info.head_teacher.name` (CS phụ trách,
+  **KHÁC** `sale` = NV bán hàng); `leads/leadsphone/get` → SĐT đầy đủ
+  (`data.ent.phone`; SĐT trong leadsinfo bị che nên không dùng). Cache ở tab ẩn
+  `_profile` (uid, gvcn, sdt) → mỗi lượt chỉ tra bé còn thiếu, tối đa
+  `FIRST_LESSON_PROFILE_LIMIT`/lượt, có `sleep(0.3s)` tránh rate-limit
+  leadsphone. Ô thiếu (leadsphone rỗng lượt này, hoặc bé chưa gán GVCN) tự tra
+  lại lượt sau → đầy dần.
+- **2 cột CS tự điền** ("Trạng thái CS", "Ghi chú CS" — cuối mỗi tab): tool
+  **giữ nguyên theo UID** qua mỗi lượt (đọc lại rồi ghi đúng bé dù dòng sắp xếp
+  lại). CS **chỉ** điền 2 cột này; các cột khác tool tự ghi đè mỗi 30'.
+- **Tab "Lịch sử buổi đầu"**: log tích luỹ các bé có buổi đầu từng ngày (append,
+  dedup theo (Ngày, UID), giữ tối đa `LOG_MAX`=3000 dòng). "Cần chăm hôm nay"
+  reset mỗi ngày nên tab này để CS rà lại đã chăm buổi đầu các ngày trước chưa.
+  Có 2 cột CS tự điền, cũng được giữ nguyên.
 
 ## Thiết lập (làm tay 1 lần)
 
@@ -123,7 +138,8 @@ tab ẩn _pool (bé đang chờ, lần chạy trước)  ───┘      → �
 2. Secret `GOOGLE_SHEET_ID_FIRST` = ID sheet đó. (Các secret `SUPABASE_*`,
    `CRM_ENCRYPT_KEY`, `GOOGLE_SA_JSON` dùng chung với job 1.)
 3. *(tuỳ chọn)* Repo Variables: `FIRST_LESSON_ARRIVAL_DAYS` (mặc định 3),
-   `FIRST_LESSON_SAME_BUY_MINUTES` (60), `FIRST_LESSON_POOL_MAX_DAYS` (45).
+   `FIRST_LESSON_SAME_BUY_MINUTES` (60), `FIRST_LESSON_POOL_MAX_DAYS` (45),
+   `FIRST_LESSON_PROFILE_LIMIT` (150 — số bé tra SĐT+GVCN mỗi lượt).
 4. **Seed lần đầu:** Actions → `first-lesson-care` → Run workflow → `seed_days` = 45
    (gom hết bé đã mua 45 ngày qua còn chưa học vào pool). Các lần sau chạy tự động.
 

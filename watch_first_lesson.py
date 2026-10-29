@@ -33,6 +33,7 @@ from __future__ import annotations
 import os
 import re
 import sys
+import time
 import datetime as dt
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -53,6 +54,14 @@ SHEET_TODAY = "Cần chăm hôm nay"
 SHEET_WAITING = "Danh sách chờ"
 POOL_TAB = "_pool"      # tab ẩn lưu state: bé đang chờ học buổi đầu
 HEALTH_TAB = "_health"  # tab nhật ký mỗi lượt quét (OK/SKIP) — để chẩn đoán
+PROFILE_TAB = "_profile"  # tab ẩn cache uid -> (GVCN, SĐT), khỏi tra CRM lại mỗi lượt
+LOG_TAB = "Lịch sử buổi đầu"  # log bé có buổi đầu các ngày trước (append, giữ qua ngày)
+LOG_MAX = 3000  # giữ tối đa 3000 dòng gần nhất
+
+# Hồ sơ học viên CRM (per-UID). leadsinfo/get có GVCN = head_teacher.name (KHÁC
+# sale = NV bán hàng) nhưng SĐT bị CHE -> SĐT đầy đủ lấy riêng ở leadsphone/get.
+LEADSINFO_URL = "https://sea.pri.ibanyu.com/opapi/crmi18n/crmopapii18n/leads/leadsinfo/get"
+LEADSPHONE_URL = "https://sea.pri.ibanyu.com/opapi/crmi18n/crmopapii18n/leads/leadsphone/get"
 
 # Cửa sổ quét CRM. CRM appoint/formal/list TỪ CHỐI (ret=-1) khi khoảng ngày quá
 # rộng — cửa sổ 95 ngày (55+40) làm MỌI request fail, kéo theo "lô đầu lỗi -> skip"
@@ -217,10 +226,10 @@ def _ensure_tabs(svc, sheet_id: str) -> dict:
     existing = {s["properties"]["title"]: s["properties"]["sheetId"]
                 for s in meta.get("sheets", [])}
     reqs = []
-    for t in (SHEET_TODAY, SHEET_WAITING, POOL_TAB, HEALTH_TAB):
+    for t in (SHEET_TODAY, SHEET_WAITING, LOG_TAB, POOL_TAB, HEALTH_TAB, PROFILE_TAB):
         if t not in existing:
             props = {"title": t}
-            if t == POOL_TAB:  # tab state -> ẩn khỏi mắt người xem
+            if t in (POOL_TAB, PROFILE_TAB):  # tab state -> ẩn khỏi mắt người xem
                 props["hidden"] = True
             reqs.append({"addSheet": {"properties": props}})
     if reqs:
@@ -263,6 +272,66 @@ def write_pool(svc, sheet_id: str, pool: dict[str, dict]):
         valueInputOption="RAW", body={"values": values}).execute()
 
 
+# ---------------------------------------------------------------------------
+# Cache hồ sơ (tab ẩn _profile): uid -> {gvcn, sdt}. SĐT không đổi, GVCN hiếm đổi
+# -> cache để mỗi lượt chỉ tra CRM uid còn thiếu, nhẹ tải + đỡ cháy token.
+# ---------------------------------------------------------------------------
+def read_profile(svc, sheet_id: str) -> dict[str, dict]:
+    try:
+        res = svc.spreadsheets().values().get(
+            spreadsheetId=sheet_id, range=f"'{PROFILE_TAB}'!A2:C").execute()
+    except Exception:
+        return {}
+    prof: dict[str, dict] = {}
+    for row in res.get("values", []):
+        uid = _clean_uid(row[0]) if row else None
+        if uid:
+            prof[uid] = {"gvcn": (row[1] if len(row) > 1 else "") or "",
+                         "sdt": (row[2] if len(row) > 2 else "") or ""}
+    return prof
+
+
+def write_profile(svc, sheet_id: str, profiles: dict[str, dict]):
+    values = [["uid", "gvcn", "sdt"]]
+    for uid, v in sorted(profiles.items()):
+        values.append([uid, v.get("gvcn", ""), v.get("sdt", "")])
+    svc.spreadsheets().values().batchClear(
+        spreadsheetId=sheet_id, body={"ranges": [f"'{PROFILE_TAB}'!A1:C20000"]}).execute()
+    svc.spreadsheets().values().update(
+        spreadsheetId=sheet_id, range=f"'{PROFILE_TAB}'!A1",
+        valueInputOption="RAW", body={"values": values}).execute()
+
+
+def fetch_profile(client, headers, uid) -> dict | None:
+    """Trả {gvcn, sdt} cho 1 uid, hoặc None nếu không lấy nổi cả GVCN (token lỗi).
+
+    GVCN = leads_info.head_teacher.name (leadsinfo/get) — KHÁC sale (NV bán hàng).
+    SĐT  = data.ent.phone (leadsphone/get, số đầy đủ; leadsinfo che bớt số nên không dùng).
+    SĐT lỗi riêng -> trả gvcn kèm sdt rỗng, lượt sau tự tra lại phần thiếu.
+    """
+    try:
+        n = int(uid)
+    except Exception:
+        return None
+    body = {"uid": n, "zone_name": "Asia/Saigon", "h_lc": "vi"}
+    try:
+        j = client.post(LEADSINFO_URL, headers=headers, json=body, timeout=30).json()
+        if j.get("ret") != 1:
+            return None
+        li = ((j.get("data") or {}).get("ent") or {}).get("leads_info") or {}
+        gvcn = ((li.get("head_teacher") or {}).get("name") or "").strip()
+    except Exception:
+        return None
+    sdt = ""
+    try:
+        j = client.post(LEADSPHONE_URL, headers=headers, json=body, timeout=30).json()
+        if j.get("ret") == 1:
+            sdt = (((j.get("data") or {}).get("ent") or {}).get("phone") or "").strip()
+    except Exception:
+        pass
+    return {"gvcn": gvcn, "sdt": sdt}
+
+
 def write_health(svc, sheet_id: str, status: str, detail: str):
     """Ghi 1 dòng nhật ký lượt quét vào tab _health (mới nhất trên cùng, giữ 50 dòng).
 
@@ -289,9 +358,53 @@ def write_health(svc, sheet_id: str, status: str, detail: str):
         print(f"[warn] ghi _health lỗi (bỏ qua): {exc}", flush=True)
 
 
-def write_sheet(svc, sheet_id: str, tabs: dict, kept: list[dict]):
-    """kept: [{uid, ten, purchase, today_rows}] — bé mới chưa học buổi nào."""
+# 2 cột cuối CỦA CS (tự điền) — tool GIỮ NGUYÊN theo UID qua mỗi lượt, không ghi đè.
+CS_COLS = ["Trạng thái CS", "Ghi chú CS"]
+
+
+def read_cs_notes(svc, sheet_id: str, tab: str, data_row1: int,
+                  uid_col: int, cs_col0: int) -> dict[str, list]:
+    """Đọc 2 cột CS tự điền hiện có -> {uid: [trạng_thái, ghi_chú]} để ghi lại.
+
+    data_row1 = dòng (1-based) bắt đầu data; uid_col/cs_col0 = chỉ số cột (0-based).
+    Nhờ neo theo UID nên ghi chú luôn theo đúng bé dù dòng sắp xếp lại.
+    """
+    try:
+        res = svc.spreadsheets().values().get(
+            spreadsheetId=sheet_id, range=f"'{tab}'!A{data_row1}:Z").execute()
+    except Exception:
+        return {}
+    out: dict[str, list] = {}
+    for row in res.get("values", []):
+        uid = _clean_uid(row[uid_col]) if len(row) > uid_col else None
+        if not uid:
+            continue
+        st = row[cs_col0] if len(row) > cs_col0 else ""
+        nt = row[cs_col0 + 1] if len(row) > cs_col0 + 1 else ""
+        if st or nt:
+            out[uid] = [st, nt]
+    return out
+
+
+def write_sheet(svc, sheet_id: str, tabs: dict, kept: list[dict], profiles: dict[str, dict]):
+    """kept: [{uid, ten, purchase, today_rows}] — bé mới chưa học buổi nào.
+    profiles: {uid: {gvcn, sdt}} — bổ sung GVCN (CS phụ trách) + SĐT phụ huynh."""
     now_vn = dt.datetime.now(VN_TZ).strftime("%Y-%m-%d %H:%M:%S")
+
+    # giữ ghi chú CS hiện có (neo theo UID) trước khi clear + ghi lại
+    # Cần chăm hôm nay: data từ dòng 5, UID cột B(1), cột CS = I,J (8,9)
+    # Danh sách chờ:    data từ dòng 2, UID cột B(1), cột CS = H,I (7,8)
+    today_cs = read_cs_notes(svc, sheet_id, SHEET_TODAY, 5, 1, 8)
+    wait_cs = read_cs_notes(svc, sheet_id, SHEET_WAITING, 2, 1, 7)
+
+    def _sdt(uid):
+        return (profiles.get(uid) or {}).get("sdt", "")
+
+    def _gvcn(uid):
+        return (profiles.get(uid) or {}).get("gvcn", "")
+
+    def _cs(notes, uid):
+        return notes.get(uid, ["", ""])
 
     with_today = [k for k in kept if k["today_rows"]]
 
@@ -302,24 +415,29 @@ def write_sheet(svc, sheet_id: str, tabs: dict, kept: list[dict]):
         [banner],
         [f"Cập nhật lúc: {now_vn} (giờ VN) · quét mỗi 30 phút · 8h30–22h"],
         [],
-        ["Tên bé", "UID", "Giờ học (VN)", "Giáo viên", "Trạng thái", "Ngày mua"],
+        ["Tên bé", "UID", "SĐT", "GVCN", "Giờ học (VN)", "GV dạy buổi",
+         "Trạng thái", "Ngày mua"] + CS_COLS,
     ]
     for k in sorted(with_today, key=lambda k: k["today_rows"][0]["mins"]):
         gio = ", ".join(r["hhmm"] for r in k["today_rows"])
         gv = " / ".join(sorted({r["teacher"] for r in k["today_rows"] if r["teacher"]}))
         tt = " / ".join(sorted({r["status"] for r in k["today_rows"]}))
-        today_values.append([k["ten"], k["uid"], gio, gv, tt,
-                             k["purchase"].strftime("%Y-%m-%d")])
+        today_values.append([k["ten"], k["uid"], _sdt(k["uid"]), _gvcn(k["uid"]),
+                             gio, gv, tt, k["purchase"].strftime("%Y-%m-%d")]
+                            + _cs(today_cs, k["uid"]))
     if not with_today:
         today_values.append(["— không có —"])
 
     # ----- Tab Danh sách chờ (mọi bé mới chưa học) -----
-    wait_header = ["Tên bé", "UID", "Ngày mua", "Có buổi hôm nay?", "Giờ hôm nay"]
+    wait_header = ["Tên bé", "UID", "SĐT", "GVCN", "Ngày mua",
+                   "Có buổi hôm nay?", "Giờ hôm nay"] + CS_COLS
     wait_values = [wait_header]
     for k in sorted(kept, key=lambda k: k["purchase"], reverse=True):
         gio = ", ".join(r["hhmm"] for r in k["today_rows"]) if k["today_rows"] else ""
-        wait_values.append([k["ten"], k["uid"], k["purchase"].strftime("%Y-%m-%d"),
-                            "Có" if k["today_rows"] else "", gio])
+        wait_values.append([k["ten"], k["uid"], _sdt(k["uid"]), _gvcn(k["uid"]),
+                            k["purchase"].strftime("%Y-%m-%d"),
+                            "Có" if k["today_rows"] else "", gio]
+                           + _cs(wait_cs, k["uid"]))
     if not kept:
         wait_values.append(["— không có học viên mới chưa học —"])
 
@@ -340,11 +458,14 @@ def write_sheet(svc, sheet_id: str, tabs: dict, kept: list[dict]):
     blue = {"red": 0.82, "green": 0.89, "blue": 0.98}
     green = {"red": 0.80, "green": 0.92, "blue": 0.80}
     fmt = [
+        # bỏ merge cũ trước (lần trước banner merge A–F; nay A–H) để khỏi xung đột
+        {"unmergeCells": {"range": {"sheetId": tid, "startRowIndex": 0, "endRowIndex": 1,
+                                    "startColumnIndex": 0, "endColumnIndex": 26}}},
         {"mergeCells": {"range": {"sheetId": tid, "startRowIndex": 0, "endRowIndex": 1,
-                                  "startColumnIndex": 0, "endColumnIndex": 6}, "mergeType": "MERGE_ALL"}},
+                                  "startColumnIndex": 0, "endColumnIndex": 10}, "mergeType": "MERGE_ALL"}},
         {"repeatCell": {
             "range": {"sheetId": tid, "startRowIndex": 0, "endRowIndex": 1,
-                      "startColumnIndex": 0, "endColumnIndex": 6},
+                      "startColumnIndex": 0, "endColumnIndex": 10},
             "cell": {"userEnteredFormat": {
                 "backgroundColor": blue if with_today else green,
                 "textFormat": {"bold": True, "fontSize": 13},
@@ -363,6 +484,73 @@ def write_sheet(svc, sheet_id: str, tabs: dict, kept: list[dict]):
         svc.spreadsheets().batchUpdate(spreadsheetId=sheet_id, body={"requests": fmt}).execute()
     except Exception as exc:  # format lỗi không chặn ghi data
         print(f"[warn] format lỗi (bỏ qua): {exc}")
+
+
+# ---------------------------------------------------------------------------
+# Log bé có buổi đầu các ngày trước (tab "Lịch sử buổi đầu"): append, giữ qua ngày
+# để CS rà lại đã chăm buổi đầu chưa. "Cần chăm hôm nay" reset mỗi ngày — tab này
+# tích luỹ. Dedup theo (Ngày, UID); giữ nguyên dòng cũ kèm ghi chú CS.
+# ---------------------------------------------------------------------------
+LOG_HEADER = ["Ngày", "Tên bé", "UID", "SĐT", "GVCN", "Giờ học (VN)",
+              "GV dạy buổi", "Trạng thái", "Trạng thái CS", "Ghi chú CS"]
+
+
+def _today_log_row(k, today_str, profiles):
+    gio = ", ".join(r["hhmm"] for r in k["today_rows"])
+    gv = " / ".join(sorted({r["teacher"] for r in k["today_rows"] if r["teacher"]}))
+    tt = " / ".join(sorted({r["status"] for r in k["today_rows"]}))
+    p = profiles.get(k["uid"], {})
+    return [today_str, k["ten"], k["uid"], p.get("sdt", ""), p.get("gvcn", ""),
+            gio, gv, tt, "", ""]
+
+
+def build_log_rows(old_rows, with_today, today_str, profiles):
+    """Dòng log cũ (giữ nguyên, kèm ghi chú CS) + dòng mới hôm nay (dedup theo
+    (Ngày, UID), bé mới lên đầu). Pure — test không cần mạng. Cắt còn LOG_MAX."""
+    width = len(LOG_HEADER)
+    seen, kept_old = set(), []
+    for r in old_rows:
+        r = (list(r) + [""] * width)[:width]
+        uid = _clean_uid(r[2])
+        if uid:
+            seen.add((r[0], uid))
+        kept_old.append(r)
+    new_rows = []
+    for k in sorted(with_today, key=lambda k: k["today_rows"][0]["mins"]):
+        key = (today_str, k["uid"])
+        if key in seen:
+            continue
+        seen.add(key)
+        new_rows.append(_today_log_row(k, today_str, profiles))
+    return (new_rows + kept_old)[:LOG_MAX]
+
+
+def write_log(svc, sheet_id, tabs, kept, today, profiles):
+    with_today = [k for k in kept if k["today_rows"]]
+    try:
+        res = svc.spreadsheets().values().get(
+            spreadsheetId=sheet_id, range=f"'{LOG_TAB}'!A2:J").execute()
+        old = res.get("values", [])
+    except Exception:
+        old = []
+    rows = build_log_rows(old, with_today, today.strftime("%Y-%m-%d"), profiles)
+    svc.spreadsheets().values().batchClear(
+        spreadsheetId=sheet_id, body={"ranges": [f"'{LOG_TAB}'!A1:J{LOG_MAX + 10}"]}).execute()
+    svc.spreadsheets().values().update(
+        spreadsheetId=sheet_id, range=f"'{LOG_TAB}'!A1",
+        valueInputOption="RAW", body={"values": [LOG_HEADER] + rows}).execute()
+    try:
+        lid = tabs[LOG_TAB]
+        svc.spreadsheets().batchUpdate(spreadsheetId=sheet_id, body={"requests": [
+            {"repeatCell": {"range": {"sheetId": lid, "startRowIndex": 0, "endRowIndex": 1},
+                            "cell": {"userEnteredFormat": {"textFormat": {"bold": True}}},
+                            "fields": "userEnteredFormat.textFormat"}},
+            {"updateSheetProperties": {"properties": {"sheetId": lid,
+                                                      "gridProperties": {"frozenRowCount": 1}},
+                                       "fields": "gridProperties.frozenRowCount"}},
+        ]}).execute()
+    except Exception as exc:
+        print(f"[warn] format log lỗi (bỏ qua): {exc}")
 
 
 # ---------------------------------------------------------------------------
@@ -500,8 +688,35 @@ def main():
 
     kept_today = sum(1 for k in kept if k["today_rows"])
     print(f"[kept] pool còn {len(new_pool)} bé · {kept_today} bé có buổi hôm nay")
+
+    # --- Lớp 3: bổ sung SĐT + GVCN cho bé hiển thị (cache _profile, chỉ tra bé thiếu) ---
+    profiles = read_profile(svc, sheet_id)
+    profile_limit = int(os.getenv("FIRST_LESSON_PROFILE_LIMIT") or "150")
+    need = [k["uid"] for k in kept
+            if not (profiles.get(k["uid"], {}).get("gvcn")
+                    and profiles.get(k["uid"], {}).get("sdt"))][:profile_limit]
+    if need:
+        print(f"[profile] tra SĐT+GVCN cho {len(need)} bé còn thiếu", flush=True)
+        got = 0
+        with httpx.Client() as pclient:
+            hdrs = get_auth_headers()
+            for i, uid in enumerate(need):
+                if i and i % batch_size == 0:
+                    hdrs = get_auth_headers()  # token tươi mỗi lô
+                info = fetch_profile(pclient, hdrs, uid)
+                if info is not None:
+                    profiles[uid] = info
+                    if info.get("gvcn") or info.get("sdt"):
+                        got += 1
+                time.sleep(0.3)  # leadsphone/get (hiện số) bị rate-limit nếu gọi dồn
+        print(f"[profile] lấy được {got}/{len(need)}", flush=True)
+    # prune cache về đúng pool hiện tại cho gọn, rồi ghi lại
+    profiles = {u: v for u, v in profiles.items() if u in new_pool}
+    write_profile(svc, sheet_id, profiles)
+
     write_pool(svc, sheet_id, new_pool)
-    write_sheet(svc, sheet_id, tabs, kept)
+    write_sheet(svc, sheet_id, tabs, kept, profiles)
+    write_log(svc, sheet_id, tabs, kept, today, profiles)
     write_health(svc, sheet_id, "OK",
                  f"Quét {len(to_scan)} bé · pool còn {len(new_pool)} đang chờ · "
                  f"{kept_today} bé có buổi hôm nay.")

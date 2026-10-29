@@ -9,6 +9,11 @@ from watch_first_lesson import (
     todays_lessons,
     _parse_pay_time,
     _clean_uid,
+    fetch_profile,
+    read_cs_notes,
+    build_log_rows,
+    LEADSINFO_URL,
+    LEADSPHONE_URL,
 )
 
 NOW = dt.datetime(2026, 10, 26, 12, 0, tzinfo=VN_TZ)
@@ -97,6 +102,111 @@ def test_todays_lessons():
     ]
     rows = todays_lessons(items, today)
     assert [r["hhmm"] for r in rows] == ["15:00", "17:00"]  # sắp theo giờ
+
+
+# --- fetch_profile: parse GVCN + SĐT từ shape thật của CRM (không đụng mạng) ---
+class _Resp:
+    def __init__(self, payload):
+        self._p = payload
+
+    def json(self):
+        return self._p
+
+
+class _FakeClient:
+    """Giả client: trả đúng shape leadsinfo/get và leadsphone/get đã bắt từ HAR."""
+    def __init__(self, info=None, phone=None):
+        self._info = info
+        self._phone = phone
+
+    def post(self, url, headers=None, json=None, timeout=None):
+        if url == LEADSINFO_URL:
+            return _Resp(self._info)
+        if url == LEADSPHONE_URL:
+            return _Resp(self._phone)
+        raise AssertionError(f"url lạ: {url}")
+
+
+_INFO_OK = {"ret": 1, "data": {"ent": {"leads_info": {
+    "head_teacher": {"name": "Ellie Advisor"},   # = GVCN
+    "sale": {"name": "Pham Hong Hanh"},           # = NV bán hàng (phải BỎ)
+    "user": {"phone": "84-886****88"},            # SĐT bị che -> không dùng
+}}}}
+_PHONE_OK = {"ret": 1, "data": {"ent": {"phone": "84-946224065"}}}  # số đầy đủ
+
+
+def test_fetch_profile_gvcn_and_phone():
+    out = fetch_profile(_FakeClient(_INFO_OK, _PHONE_OK), {}, 3321114530)
+    assert out == {"gvcn": "Ellie Advisor", "sdt": "84-946224065"}, out
+
+
+def test_fetch_profile_phone_fail_keeps_gvcn():
+    # leadsphone lỗi (ret!=1) -> vẫn giữ GVCN, SĐT rỗng (lượt sau tra lại)
+    out = fetch_profile(_FakeClient(_INFO_OK, {"ret": -1}), {}, 1)
+    assert out == {"gvcn": "Ellie Advisor", "sdt": ""}, out
+
+
+def test_fetch_profile_info_fail_returns_none():
+    # leadsinfo lỗi (token) -> None, không cache, thử lại lượt sau
+    out = fetch_profile(_FakeClient({"ret": -1}, _PHONE_OK), {}, 1)
+    assert out is None, out
+
+
+# --- read_cs_notes: giữ ghi chú CS neo theo UID (không đụng mạng) ---
+class _FakeSheets:
+    def __init__(self, values):
+        self._values = values
+
+    def spreadsheets(self):
+        return self
+
+    def values(self):
+        return self
+
+    def get(self, spreadsheetId=None, range=None):
+        return self
+
+    def execute(self):
+        return {"values": self._values}
+
+
+def test_read_cs_notes_anchors_by_uid():
+    # Danh sách chờ: UID cột B(1), cột CS = H,I (7,8)
+    rows = [
+        ["Gold", "3321114530", "84-886110888", "Ellie", "2026-10-27", "Có", "18:00",
+         "Đã gọi", "mẹ bận, hẹn mai"],
+        ["", "3319622906", "84-902569605", "Tran Thu Ha", "2026-10-27", "", "",
+         "Chưa gọi", ""],
+        ["x", "3320033660", "", "", "2026-10-23", "", "", "", ""],  # không note -> bỏ
+        ["x", "84-placeholder", "", "", "", "", "", "Đã gọi", ""],   # uid rác -> bỏ
+    ]
+    out = read_cs_notes(_FakeSheets(rows), "sid", "Danh sách chờ", 2, 1, 7)
+    assert out == {
+        "3321114530": ["Đã gọi", "mẹ bận, hẹn mai"],
+        "3319622906": ["Chưa gọi", ""],
+    }, out
+
+
+# --- build_log_rows: tích luỹ log buổi đầu, dedup (Ngày,UID), giữ ghi chú CS ---
+def _wt(uid, ten, hh, mm):
+    return {"uid": uid, "ten": ten, "purchase": NOW,
+            "today_rows": [{"hhmm": f"{hh:02d}:{mm:02d}", "mins": hh * 60 + mm,
+                            "status": "Chờ lên lớp", "teacher": "T. A"}]}
+
+
+def test_build_log_dedup_and_preserve():
+    old = [
+        ["2026-10-28", "Bé Cũ", "3300000001", "84-1", "GV1", "10:00", "T", "Chờ",
+         "Đã gọi", "note cũ"],
+        ["2026-10-29", "Trùng", "3300000002", "", "", "09:00", "T", "Chờ", "", ""],
+    ]
+    profiles = {"3300000003": {"sdt": "84-3", "gvcn": "GV3"}}
+    wt = [_wt("3300000002", "Trùng", 9, 0),    # (2026-10-29, ..2) đã có -> bỏ
+          _wt("3300000003", "Bé Mới", 8, 30)]
+    out = build_log_rows(old, wt, "2026-10-29", profiles)
+    assert out[0][:6] == ["2026-10-29", "Bé Mới", "3300000003", "84-3", "GV3", "08:30"], out[0]
+    assert len(out) == 3, out                       # 2 cũ + 1 mới (không nhân đôi)
+    assert out[1][8:10] == ["Đã gọi", "note cũ"]     # ghi chú CS dòng cũ giữ nguyên
 
 
 def run():
