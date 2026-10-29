@@ -126,6 +126,10 @@ tab ẩn _pool (bé đang chờ, lần chạy trước)  ───┘      → �
 - **2 cột CS tự điền** ("Trạng thái CS", "Ghi chú CS" — cuối mỗi tab): tool
   **giữ nguyên theo UID** qua mỗi lượt (đọc lại rồi ghi đúng bé dù dòng sắp xếp
   lại). CS **chỉ** điền 2 cột này; các cột khác tool tự ghi đè mỗi 30'.
+- **Tab "Lịch sử buổi đầu"**: log tích luỹ các bé có buổi đầu từng ngày (append,
+  dedup theo (Ngày, UID), giữ tối đa `LOG_MAX`=3000 dòng). "Cần chăm hôm nay"
+  reset mỗi ngày nên tab này để CS rà lại đã chăm buổi đầu các ngày trước chưa.
+  Có 2 cột CS tự điền, cũng được giữ nguyên.
 
 ## Thiết lập (làm tay 1 lần)
 

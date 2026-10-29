@@ -11,6 +11,7 @@ from watch_first_lesson import (
     _clean_uid,
     fetch_profile,
     read_cs_notes,
+    build_log_rows,
     LEADSINFO_URL,
     LEADSPHONE_URL,
 )
@@ -184,6 +185,28 @@ def test_read_cs_notes_anchors_by_uid():
         "3321114530": ["Đã gọi", "mẹ bận, hẹn mai"],
         "3319622906": ["Chưa gọi", ""],
     }, out
+
+
+# --- build_log_rows: tích luỹ log buổi đầu, dedup (Ngày,UID), giữ ghi chú CS ---
+def _wt(uid, ten, hh, mm):
+    return {"uid": uid, "ten": ten, "purchase": NOW,
+            "today_rows": [{"hhmm": f"{hh:02d}:{mm:02d}", "mins": hh * 60 + mm,
+                            "status": "Chờ lên lớp", "teacher": "T. A"}]}
+
+
+def test_build_log_dedup_and_preserve():
+    old = [
+        ["2026-10-28", "Bé Cũ", "3300000001", "84-1", "GV1", "10:00", "T", "Chờ",
+         "Đã gọi", "note cũ"],
+        ["2026-10-29", "Trùng", "3300000002", "", "", "09:00", "T", "Chờ", "", ""],
+    ]
+    profiles = {"3300000003": {"sdt": "84-3", "gvcn": "GV3"}}
+    wt = [_wt("3300000002", "Trùng", 9, 0),    # (2026-10-29, ..2) đã có -> bỏ
+          _wt("3300000003", "Bé Mới", 8, 30)]
+    out = build_log_rows(old, wt, "2026-10-29", profiles)
+    assert out[0][:6] == ["2026-10-29", "Bé Mới", "3300000003", "84-3", "GV3", "08:30"], out[0]
+    assert len(out) == 3, out                       # 2 cũ + 1 mới (không nhân đôi)
+    assert out[1][8:10] == ["Đã gọi", "note cũ"]     # ghi chú CS dòng cũ giữ nguyên
 
 
 def run():

@@ -55,6 +55,8 @@ SHEET_WAITING = "Danh sách chờ"
 POOL_TAB = "_pool"      # tab ẩn lưu state: bé đang chờ học buổi đầu
 HEALTH_TAB = "_health"  # tab nhật ký mỗi lượt quét (OK/SKIP) — để chẩn đoán
 PROFILE_TAB = "_profile"  # tab ẩn cache uid -> (GVCN, SĐT), khỏi tra CRM lại mỗi lượt
+LOG_TAB = "Lịch sử buổi đầu"  # log bé có buổi đầu các ngày trước (append, giữ qua ngày)
+LOG_MAX = 3000  # giữ tối đa 3000 dòng gần nhất
 
 # Hồ sơ học viên CRM (per-UID). leadsinfo/get có GVCN = head_teacher.name (KHÁC
 # sale = NV bán hàng) nhưng SĐT bị CHE -> SĐT đầy đủ lấy riêng ở leadsphone/get.
@@ -224,7 +226,7 @@ def _ensure_tabs(svc, sheet_id: str) -> dict:
     existing = {s["properties"]["title"]: s["properties"]["sheetId"]
                 for s in meta.get("sheets", [])}
     reqs = []
-    for t in (SHEET_TODAY, SHEET_WAITING, POOL_TAB, HEALTH_TAB, PROFILE_TAB):
+    for t in (SHEET_TODAY, SHEET_WAITING, LOG_TAB, POOL_TAB, HEALTH_TAB, PROFILE_TAB):
         if t not in existing:
             props = {"title": t}
             if t in (POOL_TAB, PROFILE_TAB):  # tab state -> ẩn khỏi mắt người xem
@@ -485,6 +487,73 @@ def write_sheet(svc, sheet_id: str, tabs: dict, kept: list[dict], profiles: dict
 
 
 # ---------------------------------------------------------------------------
+# Log bé có buổi đầu các ngày trước (tab "Lịch sử buổi đầu"): append, giữ qua ngày
+# để CS rà lại đã chăm buổi đầu chưa. "Cần chăm hôm nay" reset mỗi ngày — tab này
+# tích luỹ. Dedup theo (Ngày, UID); giữ nguyên dòng cũ kèm ghi chú CS.
+# ---------------------------------------------------------------------------
+LOG_HEADER = ["Ngày", "Tên bé", "UID", "SĐT", "GVCN", "Giờ học (VN)",
+              "GV dạy buổi", "Trạng thái", "Trạng thái CS", "Ghi chú CS"]
+
+
+def _today_log_row(k, today_str, profiles):
+    gio = ", ".join(r["hhmm"] for r in k["today_rows"])
+    gv = " / ".join(sorted({r["teacher"] for r in k["today_rows"] if r["teacher"]}))
+    tt = " / ".join(sorted({r["status"] for r in k["today_rows"]}))
+    p = profiles.get(k["uid"], {})
+    return [today_str, k["ten"], k["uid"], p.get("sdt", ""), p.get("gvcn", ""),
+            gio, gv, tt, "", ""]
+
+
+def build_log_rows(old_rows, with_today, today_str, profiles):
+    """Dòng log cũ (giữ nguyên, kèm ghi chú CS) + dòng mới hôm nay (dedup theo
+    (Ngày, UID), bé mới lên đầu). Pure — test không cần mạng. Cắt còn LOG_MAX."""
+    width = len(LOG_HEADER)
+    seen, kept_old = set(), []
+    for r in old_rows:
+        r = (list(r) + [""] * width)[:width]
+        uid = _clean_uid(r[2])
+        if uid:
+            seen.add((r[0], uid))
+        kept_old.append(r)
+    new_rows = []
+    for k in sorted(with_today, key=lambda k: k["today_rows"][0]["mins"]):
+        key = (today_str, k["uid"])
+        if key in seen:
+            continue
+        seen.add(key)
+        new_rows.append(_today_log_row(k, today_str, profiles))
+    return (new_rows + kept_old)[:LOG_MAX]
+
+
+def write_log(svc, sheet_id, tabs, kept, today, profiles):
+    with_today = [k for k in kept if k["today_rows"]]
+    try:
+        res = svc.spreadsheets().values().get(
+            spreadsheetId=sheet_id, range=f"'{LOG_TAB}'!A2:J").execute()
+        old = res.get("values", [])
+    except Exception:
+        old = []
+    rows = build_log_rows(old, with_today, today.strftime("%Y-%m-%d"), profiles)
+    svc.spreadsheets().values().batchClear(
+        spreadsheetId=sheet_id, body={"ranges": [f"'{LOG_TAB}'!A1:J{LOG_MAX + 10}"]}).execute()
+    svc.spreadsheets().values().update(
+        spreadsheetId=sheet_id, range=f"'{LOG_TAB}'!A1",
+        valueInputOption="RAW", body={"values": [LOG_HEADER] + rows}).execute()
+    try:
+        lid = tabs[LOG_TAB]
+        svc.spreadsheets().batchUpdate(spreadsheetId=sheet_id, body={"requests": [
+            {"repeatCell": {"range": {"sheetId": lid, "startRowIndex": 0, "endRowIndex": 1},
+                            "cell": {"userEnteredFormat": {"textFormat": {"bold": True}}},
+                            "fields": "userEnteredFormat.textFormat"}},
+            {"updateSheetProperties": {"properties": {"sheetId": lid,
+                                                      "gridProperties": {"frozenRowCount": 1}},
+                                       "fields": "gridProperties.frozenRowCount"}},
+        ]}).execute()
+    except Exception as exc:
+        print(f"[warn] format log lỗi (bỏ qua): {exc}")
+
+
+# ---------------------------------------------------------------------------
 # Token CRM sống rất ngắn (~1') → probe 1 phát để biết token còn dùng được không
 # (single-shot, không retry) trước khi quét hàng loạt.
 # ---------------------------------------------------------------------------
@@ -647,6 +716,7 @@ def main():
 
     write_pool(svc, sheet_id, new_pool)
     write_sheet(svc, sheet_id, tabs, kept, profiles)
+    write_log(svc, sheet_id, tabs, kept, today, profiles)
     write_health(svc, sheet_id, "OK",
                  f"Quét {len(to_scan)} bé · pool còn {len(new_pool)} đang chờ · "
                  f"{kept_today} bé có buổi hôm nay.")
