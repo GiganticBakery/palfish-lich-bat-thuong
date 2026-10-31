@@ -196,6 +196,22 @@ def count_completed_after(items: list[dict], purchase: dt.datetime) -> int:
     return n
 
 
+def count_completed_before(items: list[dict], purchase: dt.datetime,
+                           before_date: dt.date) -> int:
+    """Buổi đã học chính thức (action==2) sau khi mua NHƯNG trước mốc `before_date`.
+
+    Dùng để loại bé ĐÃ học buổi chính thức từ trước tuần này (không phải bé buổi
+    đầu) — tránh danh sách phình ra toàn bé đang học lâu rồi có buổi trong tuần."""
+    n = 0
+    for it in items:
+        if it.get("action") != ACTION_COMPLETED:
+            continue
+        ldt = _lesson_dt(it)
+        if ldt and ldt > purchase and ldt.date() < before_date:
+            n += 1
+    return n
+
+
 def todays_lessons(items: list[dict], today: dt.date) -> list[dict]:
     """Buổi học trong NGÀY hôm nay (mọi trạng thái), sắp theo giờ."""
     rows = []
@@ -728,12 +744,13 @@ def main():
 
     def _keep(uid, purchase, items):
         wk = week_lessons(items, monday, sunday)
-        completed = count_completed_after(items, purchase) >= 1
-        # Đã học buổi đầu VÀ buổi đó đã sang tuần trước (không còn buổi tuần này)
-        # -> xong, rút pool. Nếu buổi đầu rơi TRONG tuần này thì GIỮ để CS review
-        # cả tuần (kể cả đã học xong), chỉ rút khi tuần sau tới.
-        if completed and not wk:
+        # Đã học buổi chính thức TỪ TRƯỚC tuần này -> không phải bé "buổi đầu" nữa
+        # (bé đang học lâu rồi, vẫn có buổi trong tuần) -> LOẠI, tránh phình list.
+        if count_completed_before(items, purchase, monday) >= 1:
             return
+        # Còn lại: chưa học buổi nào trước tuần này. Buổi đầu rơi trong/sau tuần này.
+        # Nếu đã học xong buổi đầu TRONG tuần này -> vẫn giữ (CS review cả tuần).
+        completed = count_completed_after(items, purchase) >= 1
         ten = (pool.get(uid, {}).get("ten")
                or next((((it.get("student") or {}).get("name") or "")
                         for it in items if (it.get("student") or {}).get("name")), ""))

@@ -7,6 +7,7 @@ from watch_first_lesson import (
     select_new_candidates,
     renewal_uids_from,
     count_completed_after,
+    count_completed_before,
     todays_lessons,
     week_bounds,
     week_lessons,
@@ -111,6 +112,22 @@ def test_count_completed_after_purchase():
         _item(24, 10, 1),   # chờ lên lớp -> không tính
     ]
     assert count_completed_after(items, purchase) == 1
+
+
+def test_count_completed_before_week():
+    # mốc tuần = 2026-10-26 (T2). Bé mua 2026-10-15.
+    purchase = _parse_pay_time(_pt(15, 9, 0))
+    monday = dt.date(2026, 10, 26)
+    items = [
+        _item(20, 10, 2),   # đã học, SAU mua, TRƯỚC tuần này -> tính (bé đang học lâu)
+        _item(28, 10, 2),   # đã học nhưng TRONG tuần này -> không tính
+        _item(14, 10, 2),   # trước khi mua -> không tính
+        _item(22, 10, 1),   # chờ lên lớp -> không tính
+    ]
+    assert count_completed_before(items, purchase, monday) == 1
+    # bé buổi đầu tuần này: chỉ có buổi trong tuần -> 0
+    items2 = [_item(28, 10, 2), _item(31, 10, 1)]
+    assert count_completed_before(items2, purchase, monday) == 0
 
 
 def test_count_zero_keeps():
