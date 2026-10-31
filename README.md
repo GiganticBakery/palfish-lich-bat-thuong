@@ -105,8 +105,14 @@ Supabase so_doanh_thu  →  lọc "học viên mới"  ─┐
                                                ├─ quét CRM CHỈ (pool ∪ bé mới)
 tab ẩn _pool (bé đang chờ, lần chạy trước)  ───┘      → đếm buổi đã học (action==2)
    → bé 0 buổi học + mua gần đây giữ trong pool · bé đã học buổi đầu rút khỏi pool
-   → ghi tab "Cần chăm hôm nay" + "Danh sách chờ"
+   → ghi tab "Cần chăm tuần này" + "Danh sách chờ"
 ```
+
+- **Tab "Cần chăm tuần này" (T2–CN)**: hiện mọi bé có buổi đầu trong TUẦN hiện
+  tại (không reset theo ngày; bé có buổi T2 vẫn hiện tới CN), có cột **Ngày học**.
+  Bé đã học xong buổi đầu rút khỏi pool (sang tab "Lịch sử buổi đầu"). Cửa sổ quét
+  CRM nới AHEAD=7 để phủ hết tuần (tổng ~52 ngày, dưới ngưỡng CRM). *(Tab cũ "Cần
+  chăm hôm nay" được tự đổi tên sang tab này, giữ nguyên ghi chú CS.)*
 
 - **Học viên mới** = mọi đơn của 1 uid rơi vào cùng 1 lần mua (1 đơn, hoặc nhiều
   bé mua cùng lúc trong `FIRST_LESSON_SAME_BUY_MINUTES` phút). Có đơn ở lần mua
