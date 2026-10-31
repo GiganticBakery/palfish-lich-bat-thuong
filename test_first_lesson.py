@@ -11,6 +11,7 @@ from watch_first_lesson import (
     todays_lessons,
     week_bounds,
     week_lessons,
+    care_sort_key,
     _parse_pay_time,
     _clean_uid,
     fetch_gvcn,
@@ -274,6 +275,23 @@ def test_week_lessons_filters_to_week_and_sorts():
     rows = week_lessons(items, mon, sun)
     assert [r["date"] for r in rows] == ["2026-10-26", "2026-10-28"]  # trong tuần, sắp tăng
     assert rows[0]["hhmm"] == "09:00"
+
+
+def test_care_sort_upcoming_nearest_first():
+    today = dt.date(2026, 10, 31)
+
+    def wr(date, hh):
+        dk = dt.date.fromisoformat(date).toordinal() * 10000 + hh * 60
+        return [{"date": date, "dkey": dk, "hhmm": f"{hh:02d}:00",
+                 "status": "", "teacher": ""}]
+
+    today_lesson = wr("2026-10-31", 20)   # hôm nay (sắp tới)
+    sunday = wr("2026-11-01", 9)           # CN (sắp tới, xa hơn)
+    monday = wr("2026-10-26", 9)           # T2 (đã qua)
+    order = sorted([monday, sunday, today_lesson],
+                   key=lambda w: care_sort_key(w, today))
+    # sắp tới gần nhất (hôm nay) -> rồi CN -> cuối là buổi đã qua
+    assert order[0] is today_lesson and order[1] is sunday and order[2] is monday
 
 
 def run():
