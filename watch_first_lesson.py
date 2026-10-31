@@ -50,7 +50,8 @@ from watch_schedule import (
     build_sheets_service,
 )
 
-SHEET_TODAY = "Cần chăm hôm nay"
+SHEET_CARE = "Cần chăm tuần này"
+_OLD_CARE_TAB = "Cần chăm hôm nay"   # tên cũ (daily) -> rename sang SHEET_CARE
 SHEET_WAITING = "Danh sách chờ"
 POOL_TAB = "_pool"      # tab ẩn lưu state: bé đang chờ học buổi đầu
 HEALTH_TAB = "_health"  # tab nhật ký mỗi lượt quét (OK/SKIP) — để chẩn đoán
@@ -70,7 +71,7 @@ LEADSPHONE_URL = "https://sea.pri.ibanyu.com/opapi/crmi18n/crmopapii18n/leads/le
 # vài ngày TỚI để bắt buổi hôm nay (không cần nhìn xa tương lai). Tổng ~50 ngày,
 # nằm dưới ngưỡng CRM (Job 1 chạy tốt ở ~54 ngày).
 CRM_WINDOW_BACK_DAYS = 48   # phải >= FIRST_LESSON_POOL_MAX_DAYS, nếu không đếm thiếu buổi đã học
-CRM_WINDOW_AHEAD_DAYS = 2
+CRM_WINDOW_AHEAD_DAYS = 7   # đủ phủ tới CN tuần này (bé có buổi muộn trong tuần)
 ACTION_COMPLETED = 2  # "Đã kết thúc lớp" = đã học chính thức
 
 
@@ -213,6 +214,31 @@ def todays_lessons(items: list[dict], today: dt.date) -> list[dict]:
     return rows
 
 
+def week_bounds(today: dt.date) -> tuple[dt.date, dt.date]:
+    """Thứ 2 -> Chủ nhật của tuần chứa `today` (VN). weekday(): T2=0..CN=6."""
+    monday = today - dt.timedelta(days=today.weekday())
+    return monday, monday + dt.timedelta(days=6)
+
+
+def week_lessons(items: list[dict], monday: dt.date, sunday: dt.date) -> list[dict]:
+    """Buổi học trong TUẦN này [monday..sunday] (mọi trạng thái), sắp theo ngày+giờ."""
+    rows = []
+    for it in items:
+        ldt = _lesson_dt(it)
+        if not ldt or not (monday <= ldt.date() <= sunday):
+            continue
+        a = it.get("action")
+        rows.append({
+            "date": ldt.strftime("%Y-%m-%d"),
+            "dkey": ldt.date().toordinal() * 10000 + ldt.hour * 60 + ldt.minute,
+            "hhmm": ldt.strftime("%H:%M"),
+            "status": ACTION_STATUS.get(a, f"Khác (mã {a})"),
+            "teacher": (it.get("teacher") or {}).get("name") or "",
+        })
+    rows.sort(key=lambda r: r["dkey"])
+    return rows
+
+
 # ---------------------------------------------------------------------------
 # Supabase: kéo toàn bộ (uid, pay_time, is_test) của so_doanh_thu
 # ---------------------------------------------------------------------------
@@ -251,8 +277,15 @@ def _ensure_tabs(svc, sheet_id: str) -> dict:
     meta = svc.spreadsheets().get(spreadsheetId=sheet_id).execute()
     existing = {s["properties"]["title"]: s["properties"]["sheetId"]
                 for s in meta.get("sheets", [])}
+    # Migrate: đổi tên tab cũ "Cần chăm hôm nay" -> "Cần chăm tuần này" (giữ ghi chú CS)
+    if _OLD_CARE_TAB in existing and SHEET_CARE not in existing:
+        svc.spreadsheets().batchUpdate(spreadsheetId=sheet_id, body={"requests": [
+            {"updateSheetProperties": {
+                "properties": {"sheetId": existing[_OLD_CARE_TAB], "title": SHEET_CARE},
+                "fields": "title"}}]}).execute()
+        existing[SHEET_CARE] = existing.pop(_OLD_CARE_TAB)
     reqs = []
-    for t in (SHEET_TODAY, SHEET_WAITING, LOG_TAB, POOL_TAB, HEALTH_TAB, PROFILE_TAB):
+    for t in (SHEET_CARE, SHEET_WAITING, LOG_TAB, POOL_TAB, HEALTH_TAB, PROFILE_TAB):
         if t not in existing:
             props = {"title": t}
             if t in (POOL_TAB, PROFILE_TAB):  # tab state -> ẩn khỏi mắt người xem
@@ -421,9 +454,9 @@ def write_sheet(svc, sheet_id: str, tabs: dict, kept: list[dict], profiles: dict
     now_vn = dt.datetime.now(VN_TZ).strftime("%Y-%m-%d %H:%M:%S")
 
     # giữ ghi chú CS hiện có (neo theo UID) trước khi clear + ghi lại
-    # Cần chăm hôm nay: data từ dòng 5, UID cột B(1), cột CS = I,J (8,9)
-    # Danh sách chờ:    data từ dòng 2, UID cột B(1), cột CS = H,I (7,8)
-    today_cs = read_cs_notes(svc, sheet_id, SHEET_TODAY, 5, 1, 8)
+    # Cần chăm tuần này: data từ dòng 5, UID cột B(1), cột CS = J,K (9,10)
+    # Danh sách chờ:     data từ dòng 2, UID cột B(1), cột CS = H,I (7,8)
+    care_cs = read_cs_notes(svc, sheet_id, SHEET_CARE, 5, 1, 9)
     wait_cs = read_cs_notes(svc, sheet_id, SHEET_WAITING, 2, 1, 7)
 
     def _sdt(uid):
@@ -435,27 +468,31 @@ def write_sheet(svc, sheet_id: str, tabs: dict, kept: list[dict], profiles: dict
     def _cs(notes, uid):
         return notes.get(uid, ["", ""])
 
-    with_today = [k for k in kept if k["today_rows"]]
+    monday, sunday = week_bounds(dt.datetime.now(VN_TZ).date())
+    with_week = [k for k in kept if k.get("week_rows")]
 
-    # ----- Tab Cần chăm hôm nay -----
-    banner = (f"🔔 {len(with_today)} học viên có buổi học hôm nay — CS chuẩn bị chăm"
-              if with_today else "✅ Hôm nay chưa có học viên mới nào tới buổi học")
-    today_values = [
+    # ----- Tab Cần chăm tuần này (T2–CN) -----
+    wk = f"T2 {monday.strftime('%d/%m')} – CN {sunday.strftime('%d/%m')}"
+    banner = (f"🔔 {len(with_week)} học viên có buổi đầu TUẦN NÀY ({wk}) — CS chuẩn bị chăm"
+              if with_week else f"✅ Tuần này ({wk}) chưa có học viên mới tới buổi học")
+    care_values = [
         [banner],
-        [f"Cập nhật lúc: {now_vn} (giờ VN) · quét mỗi 30 phút · 8h30–22h"],
+        [f"Cập nhật lúc: {now_vn} (giờ VN) · quét mỗi 30 phút · 8h30–22h · mốc T2–CN"],
         [],
-        ["Tên bé", "UID", "SĐT", "GVCN", "Giờ học (VN)", "GV dạy buổi",
+        ["Tên bé", "UID", "SĐT", "GVCN", "Ngày học", "Giờ học (VN)", "GV dạy buổi",
          "Trạng thái", "Ngày mua"] + CS_COLS,
     ]
-    for k in sorted(with_today, key=lambda k: k["today_rows"][0]["mins"]):
-        gio = ", ".join(r["hhmm"] for r in k["today_rows"])
-        gv = " / ".join(sorted({r["teacher"] for r in k["today_rows"] if r["teacher"]}))
-        tt = " / ".join(sorted({r["status"] for r in k["today_rows"]}))
-        today_values.append([k["ten"], k["uid"], _sdt(k["uid"]), _gvcn(k["uid"]),
-                             gio, gv, tt, k["purchase"].strftime("%Y-%m-%d")]
-                            + _cs(today_cs, k["uid"]))
-    if not with_today:
-        today_values.append(["— không có —"])
+    for k in sorted(with_week, key=lambda k: k["week_rows"][0]["dkey"]):
+        wr = k["week_rows"]
+        ngay = ", ".join(dict.fromkeys(r["date"] for r in wr))   # ngày distinct, giữ thứ tự
+        gio = ", ".join(r["hhmm"] for r in wr)
+        gv = " / ".join(sorted({r["teacher"] for r in wr if r["teacher"]}))
+        tt = " / ".join(sorted({r["status"] for r in wr}))
+        care_values.append([k["ten"], k["uid"], _sdt(k["uid"]), _gvcn(k["uid"]),
+                            ngay, gio, gv, tt, k["purchase"].strftime("%Y-%m-%d")]
+                           + _cs(care_cs, k["uid"]))
+    if not with_week:
+        care_values.append(["— không có —"])
 
     # ----- Tab Danh sách chờ (mọi bé mới chưa học) -----
     wait_header = ["Tên bé", "UID", "SĐT", "GVCN", "Ngày mua",
@@ -472,18 +509,18 @@ def write_sheet(svc, sheet_id: str, tabs: dict, kept: list[dict], profiles: dict
 
     svc.spreadsheets().values().batchClear(
         spreadsheetId=sheet_id,
-        body={"ranges": [f"'{SHEET_TODAY}'!A1:Z1000", f"'{SHEET_WAITING}'!A1:Z3000"]},
+        body={"ranges": [f"'{SHEET_CARE}'!A1:Z1000", f"'{SHEET_WAITING}'!A1:Z3000"]},
     ).execute()
     svc.spreadsheets().values().batchUpdate(
         spreadsheetId=sheet_id,
         body={"valueInputOption": "RAW", "data": [
-            {"range": f"'{SHEET_TODAY}'!A1", "values": today_values},
+            {"range": f"'{SHEET_CARE}'!A1", "values": care_values},
             {"range": f"'{SHEET_WAITING}'!A1", "values": wait_values},
         ]},
     ).execute()
 
     # ----- Định dạng banner + header + freeze -----
-    tid, wid = tabs[SHEET_TODAY], tabs[SHEET_WAITING]
+    tid, wid = tabs[SHEET_CARE], tabs[SHEET_WAITING]
     blue = {"red": 0.82, "green": 0.89, "blue": 0.98}
     green = {"red": 0.80, "green": 0.92, "blue": 0.80}
     fmt = [
@@ -491,12 +528,12 @@ def write_sheet(svc, sheet_id: str, tabs: dict, kept: list[dict], profiles: dict
         {"unmergeCells": {"range": {"sheetId": tid, "startRowIndex": 0, "endRowIndex": 1,
                                     "startColumnIndex": 0, "endColumnIndex": 26}}},
         {"mergeCells": {"range": {"sheetId": tid, "startRowIndex": 0, "endRowIndex": 1,
-                                  "startColumnIndex": 0, "endColumnIndex": 10}, "mergeType": "MERGE_ALL"}},
+                                  "startColumnIndex": 0, "endColumnIndex": 11}, "mergeType": "MERGE_ALL"}},
         {"repeatCell": {
             "range": {"sheetId": tid, "startRowIndex": 0, "endRowIndex": 1,
-                      "startColumnIndex": 0, "endColumnIndex": 10},
+                      "startColumnIndex": 0, "endColumnIndex": 11},
             "cell": {"userEnteredFormat": {
-                "backgroundColor": blue if with_today else green,
+                "backgroundColor": blue if with_week else green,
                 "textFormat": {"bold": True, "fontSize": 13},
                 "horizontalAlignment": "CENTER", "verticalAlignment": "MIDDLE"}},
             "fields": "userEnteredFormat(backgroundColor,textFormat,horizontalAlignment,verticalAlignment)"}},
@@ -620,6 +657,7 @@ def main():
 
     now = dt.datetime.now(VN_TZ)
     today = now.date()
+    monday, sunday = week_bounds(today)   # mốc T2–CN tuần này
 
     svc = build_sheets_service()
     tabs = _ensure_tabs(svc, sheet_id)
@@ -643,9 +681,10 @@ def main():
     scan.update(new_uids)
 
     # --- Lớp 2: quét CRM CHỈ các uid trong (pool ∪ bé mới) ---
-    # BACK phải phủ bé tồn lâu nhất (pool_max_days) để đếm đúng buổi đã học kể từ
-    # lúc mua; vẫn giữ tổng cửa sổ hẹp để CRM không trả ret=-1.
-    crm_cfg = {"date_window_days_back": max(CRM_WINDOW_BACK_DAYS, pool_max_days + 3),
+    # BACK phủ bé tồn lâu nhất (pool_max_days) để đếm đúng buổi đã học; AHEAD=7 phủ
+    # hết tuần (tới CN). Tổng pool_max_days(45)+7 = 52 ngày, DƯỚI ngưỡng CRM ~54
+    # (vượt là ret=-1). Nếu nới pool_max_days nhiều thì phải canh lại tổng < ~54.
+    crm_cfg = {"date_window_days_back": pool_max_days,
                "date_window_days_ahead": CRM_WINDOW_AHEAD_DAYS}
     batch_size = int(os.getenv("FIRST_LESSON_BATCH") or "25")
 
@@ -674,7 +713,8 @@ def main():
                         for it in items if (it.get("student") or {}).get("name")), ""))
         new_pool[uid] = {"ten": ten, "purchase": purchase}
         kept.append({"uid": uid, "ten": ten, "purchase": purchase,
-                     "today_rows": todays_lessons(items, today)})
+                     "today_rows": todays_lessons(items, today),
+                     "week_rows": week_lessons(items, monday, sunday)})
 
     done_n = 0
     with httpx.Client() as client:
@@ -722,7 +762,9 @@ def main():
                 return
 
     kept_today = sum(1 for k in kept if k["today_rows"])
-    print(f"[kept] pool còn {len(new_pool)} bé · {kept_today} bé có buổi hôm nay")
+    kept_week = sum(1 for k in kept if k.get("week_rows"))
+    print(f"[kept] pool còn {len(new_pool)} bé · {kept_week} bé có buổi tuần này "
+          f"({kept_today} hôm nay)")
 
     # --- Lớp 3: bổ sung GVCN (leadsinfo) + SĐT (leadsphone) ---
     # ⚠️ CRM giới hạn tần suất tra SĐT ("Too many phone number queries") và DOẠ
@@ -740,15 +782,15 @@ def main():
         return profiles.setdefault(uid, {"gvcn": "", "sdt": "", "sdt_tries": 0})
 
     need_gvcn = [k["uid"] for k in kept if not _p(k["uid"])["gvcn"]][:gvcn_limit]
-    today_uids = [k["uid"] for k in kept if k["today_rows"]]
+    week_uids = [k["uid"] for k in kept if k.get("week_rows")]   # bé hiện trong tab tuần
     other_uids = [k["uid"] for k in sorted(kept, key=lambda k: k["purchase"], reverse=True)
-                  if not k["today_rows"]]
-    need_phone = [u for u in today_uids + other_uids
+                  if not k.get("week_rows")]
+    need_phone = [u for u in week_uids + other_uids
                   if not _p(u)["sdt"] and _p(u).get("sdt_tries", 0) < phone_max_tries][:phone_limit]
 
     if need_gvcn or need_phone:
         print(f"[profile] GVCN {len(need_gvcn)} bé · SĐT {len(need_phone)} bé "
-              f"(ưu tiên {len(today_uids)} bé hôm nay)", flush=True)
+              f"(ưu tiên {len(week_uids)} bé có buổi tuần này)", flush=True)
         g_ok = p_ok = 0
         with httpx.Client() as pclient:
             hdrs = get_auth_headers()
@@ -791,7 +833,7 @@ def main():
     write_log(svc, sheet_id, tabs, kept, today, profiles)
     write_health(svc, sheet_id, "OK",
                  f"Quét {len(to_scan)} bé · pool còn {len(new_pool)} đang chờ · "
-                 f"{kept_today} bé có buổi hôm nay.")
+                 f"{kept_week} bé có buổi tuần này ({kept_today} hôm nay).")
     print("[done] Ghi sheet xong.")
 
 

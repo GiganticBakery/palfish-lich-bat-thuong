@@ -8,6 +8,8 @@ from watch_first_lesson import (
     renewal_uids_from,
     count_completed_after,
     todays_lessons,
+    week_bounds,
+    week_lessons,
     _parse_pay_time,
     _clean_uid,
     fetch_gvcn,
@@ -233,6 +235,21 @@ def test_build_log_dedup_and_preserve():
     assert out[0][:6] == ["2026-10-29", "Bé Mới", "3300000003", "84-3", "GV3", "08:30"], out[0]
     assert len(out) == 3, out                       # 2 cũ + 1 mới (không nhân đôi)
     assert out[1][8:10] == ["Đã gọi", "note cũ"]     # ghi chú CS dòng cũ giữ nguyên
+
+
+def test_week_bounds_monday_sunday():
+    mon, sun = week_bounds(dt.date(2026, 10, 28))
+    assert mon.weekday() == 0                       # T2
+    assert sun == mon + dt.timedelta(days=6)        # CN
+    assert mon <= dt.date(2026, 10, 28) <= sun
+
+
+def test_week_lessons_filters_to_week_and_sorts():
+    mon, sun = dt.date(2026, 10, 26), dt.date(2026, 11, 1)
+    items = [_item(28, 14, 2), _item(26, 9, 1), _item(25, 10, 1)]  # 25 = ngoài tuần
+    rows = week_lessons(items, mon, sun)
+    assert [r["date"] for r in rows] == ["2026-10-26", "2026-10-28"]  # trong tuần, sắp tăng
+    assert rows[0]["hhmm"] == "09:00"
 
 
 def run():
