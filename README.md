@@ -110,7 +110,9 @@ tab ẩn _pool (bé đang chờ, lần chạy trước)  ───┘      → �
 
 - **Tab "Cần chăm tuần này" (T2–CN)**: hiện mọi bé có buổi đầu trong TUẦN hiện
   tại (không reset theo ngày; bé có buổi T2 vẫn hiện tới CN), có cột **Ngày học**.
-  Bé đã học xong buổi đầu rút khỏi pool (sang tab "Lịch sử buổi đầu"). Cửa sổ quét
+  Bé đã học xong buổi đầu NHƯNG buổi đó rơi trong tuần này vẫn GIỮ (hiện trạng
+  thái "Đã kết thúc lớp") để CS review cả tuần; chỉ rút khi buổi đầu sang tuần
+  trước. "Danh sách chờ" chỉ hiện bé CHƯA học. Cửa sổ quét
   CRM nới AHEAD=7 để phủ hết tuần (tổng ~52 ngày, dưới ngưỡng CRM). *(Tab cũ "Cần
   chăm hôm nay" được tự đổi tên sang tab này, giữ nguyên ghi chú CS.)*
 
