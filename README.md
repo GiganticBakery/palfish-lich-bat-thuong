@@ -110,6 +110,9 @@ tab ẩn _pool (bé đang chờ, lần chạy trước)  ───┘      → �
 
 - **Tab "Cần chăm tuần này" (T2–CN)**: hiện mọi bé có buổi đầu trong TUẦN hiện
   tại (không reset theo ngày; bé có buổi T2 vẫn hiện tới CN), có cột **Ngày học**.
+  **Mỗi bé 1 dòng = đúng BUỔI ĐẦU** (buổi sớm nhất tuần) — KHÔNG gộp nhiều ngày
+  vào 1 dòng. Sắp xếp: buổi đầu **sắp tới gần nhất lên đầu** (sớm nhất trước),
+  buổi đầu đã qua xuống dưới (gần nhất trước).
   Bé đã học xong buổi đầu NHƯNG buổi đó rơi trong tuần này vẫn GIỮ (hiện trạng
   thái "Đã kết thúc lớp") để CS review cả tuần; chỉ rút khi buổi đầu sang tuần
   trước. "Danh sách chờ" chỉ hiện bé CHƯA học. Cửa sổ quét
