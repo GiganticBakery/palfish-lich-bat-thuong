@@ -277,21 +277,27 @@ def test_week_lessons_filters_to_week_and_sorts():
     assert rows[0]["hhmm"] == "09:00"
 
 
+def _dk(date, hh):
+    return dt.date.fromisoformat(date).toordinal() * 10000 + hh * 60
+
+
 def test_care_sort_upcoming_nearest_first():
     today = dt.date(2026, 10, 31)
-
-    def wr(date, hh):
-        dk = dt.date.fromisoformat(date).toordinal() * 10000 + hh * 60
-        return [{"date": date, "dkey": dk, "hhmm": f"{hh:02d}:00",
-                 "status": "", "teacher": ""}]
-
-    today_lesson = wr("2026-10-31", 20)   # hôm nay (sắp tới)
-    sunday = wr("2026-11-01", 9)           # CN (sắp tới, xa hơn)
-    monday = wr("2026-10-26", 9)           # T2 (đã qua)
+    today_lesson = _dk("2026-10-31", 20)   # hôm nay (sắp tới)
+    sunday = _dk("2026-11-01", 9)          # CN (sắp tới, xa hơn)
+    monday = _dk("2026-10-26", 9)          # T2 (đã qua)
     order = sorted([monday, sunday, today_lesson],
-                   key=lambda w: care_sort_key(w, today))
-    # sắp tới gần nhất (hôm nay) -> rồi CN -> cuối là buổi đã qua
-    assert order[0] is today_lesson and order[1] is sunday and order[2] is monday
+                   key=lambda d: care_sort_key(d, today))
+    # buổi đầu sắp tới gần nhất (hôm nay) -> rồi CN -> cuối là buổi đã qua
+    assert order == [today_lesson, sunday, monday]
+
+
+def test_first_lesson_row_is_earliest():
+    from watch_first_lesson import first_lesson_row
+    wr = [{"date": "2026-10-28", "dkey": _dk("2026-10-28", 7)},
+          {"date": "2026-10-31", "dkey": _dk("2026-10-31", 16)}]
+    # week_rows đã sort theo dkey -> buổi đầu = phần tử [0] = ngày sớm nhất
+    assert first_lesson_row(wr)["date"] == "2026-10-28"
 
 
 def run():

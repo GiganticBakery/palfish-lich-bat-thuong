@@ -255,14 +255,18 @@ def week_lessons(items: list[dict], monday: dt.date, sunday: dt.date) -> list[di
     return rows
 
 
-def care_sort_key(week_rows: list[dict], today: dt.date):
-    """Khoá sắp xếp tab chăm: buổi SẮP TỚI gần nhất lên đầu (CS chăm trước), rồi
-    tới buổi ĐÃ QUA trong tuần (gần nhất trước). dkey = ngày.toordinal()*10000+phút."""
-    today_ord = today.toordinal()
-    upcoming = [r["dkey"] for r in week_rows if r["dkey"] // 10000 >= today_ord]
-    if upcoming:
-        return (0, min(upcoming))                       # có buổi sắp tới -> trên, sớm nhất đầu
-    return (1, -max(r["dkey"] for r in week_rows))       # chỉ buổi đã qua -> dưới, gần nhất trước
+def first_lesson_row(week_rows: list[dict]) -> dict:
+    """Buổi ĐẦU của tuần = buổi sớm nhất (week_rows đã sort theo dkey)."""
+    return week_rows[0]
+
+
+def care_sort_key(dkey: int, today: dt.date):
+    """Khoá sắp xếp tab chăm theo BUỔI ĐẦU: buổi đầu SẮP TỚI gần nhất lên đầu (CS
+    chăm trước, sớm nhất đứng đầu), buổi đầu ĐÃ QUA xuống dưới (gần nhất trước).
+    dkey = ngày.toordinal()*10000+phút."""
+    if dkey // 10000 >= today.toordinal():
+        return (0, dkey)        # buổi đầu sắp tới -> trên, sớm nhất đầu
+    return (1, -dkey)           # buổi đầu đã qua -> dưới, gần nhất trước
 
 
 # ---------------------------------------------------------------------------
@@ -518,14 +522,18 @@ def write_sheet(svc, sheet_id, tabs, kept, profiles, care_cs, wait_cs):
         ["Tên bé", "UID", "SĐT", "GVCN", "Ngày học", "Giờ học (VN)", "GV dạy buổi",
          "Trạng thái", "Ngày mua"] + CS_COLS,
     ]
-    for k in sorted(with_week, key=lambda k: care_sort_key(k["week_rows"], today_vn)):
+    # 1 bé = 1 dòng = ĐÚNG buổi đầu (buổi sớm nhất tuần). Nếu buổi đầu ngày đó có
+    # nhiều slot thì gộp giờ của riêng ngày đó; KHÔNG gộp các ngày khác nhau.
+    for k in sorted(with_week,
+                    key=lambda k: care_sort_key(first_lesson_row(k["week_rows"])["dkey"], today_vn)):
         wr = k["week_rows"]
-        ngay = ", ".join(dict.fromkeys(r["date"] for r in wr))   # ngày distinct, giữ thứ tự
-        gio = ", ".join(r["hhmm"] for r in wr)
-        gv = " / ".join(sorted({r["teacher"] for r in wr if r["teacher"]}))
-        tt = " / ".join(sorted({r["status"] for r in wr}))
+        d0 = wr[0]["date"]
+        same = [r for r in wr if r["date"] == d0]          # chỉ slot của buổi đầu
+        gio = ", ".join(r["hhmm"] for r in same)
+        gv = " / ".join(sorted({r["teacher"] for r in same if r["teacher"]}))
+        tt = " / ".join(sorted({r["status"] for r in same}))
         care_values.append([k["ten"], k["uid"], _sdt(k["uid"]), _gvcn(k["uid"]),
-                            ngay, gio, gv, tt, k["purchase"].strftime("%Y-%m-%d")]
+                            d0, gio, gv, tt, k["purchase"].strftime("%Y-%m-%d")]
                            + _cs(care_cs, k["uid"]))
     if not with_week:
         care_values.append(["— không có —"])
