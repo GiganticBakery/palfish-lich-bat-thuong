@@ -494,17 +494,18 @@ def write_sheet(svc, sheet_id: str, tabs: dict, kept: list[dict], profiles: dict
     if not with_week:
         care_values.append(["— không có —"])
 
-    # ----- Tab Danh sách chờ (mọi bé mới chưa học) -----
+    # ----- Tab Danh sách chờ (bé mới CHƯA học buổi nào) -----
+    waiting = [k for k in kept if not k.get("completed")]   # bỏ bé đã học xong buổi đầu
     wait_header = ["Tên bé", "UID", "SĐT", "GVCN", "Ngày mua",
                    "Có buổi hôm nay?", "Giờ hôm nay"] + CS_COLS
     wait_values = [wait_header]
-    for k in sorted(kept, key=lambda k: k["purchase"], reverse=True):
+    for k in sorted(waiting, key=lambda k: k["purchase"], reverse=True):
         gio = ", ".join(r["hhmm"] for r in k["today_rows"]) if k["today_rows"] else ""
         wait_values.append([k["ten"], k["uid"], _sdt(k["uid"]), _gvcn(k["uid"]),
                             k["purchase"].strftime("%Y-%m-%d"),
                             "Có" if k["today_rows"] else "", gio]
                            + _cs(wait_cs, k["uid"]))
-    if not kept:
+    if not waiting:
         wait_values.append(["— không có học viên mới chưa học —"])
 
     svc.spreadsheets().values().batchClear(
@@ -706,15 +707,20 @@ def main():
             return uid, purchase, None, exc
 
     def _keep(uid, purchase, items):
-        if count_completed_after(items, purchase) >= 1:
-            return  # đã học buổi đầu -> rút khỏi pool
+        wk = week_lessons(items, monday, sunday)
+        completed = count_completed_after(items, purchase) >= 1
+        # Đã học buổi đầu VÀ buổi đó đã sang tuần trước (không còn buổi tuần này)
+        # -> xong, rút pool. Nếu buổi đầu rơi TRONG tuần này thì GIỮ để CS review
+        # cả tuần (kể cả đã học xong), chỉ rút khi tuần sau tới.
+        if completed and not wk:
+            return
         ten = (pool.get(uid, {}).get("ten")
                or next((((it.get("student") or {}).get("name") or "")
                         for it in items if (it.get("student") or {}).get("name")), ""))
         new_pool[uid] = {"ten": ten, "purchase": purchase}
-        kept.append({"uid": uid, "ten": ten, "purchase": purchase,
+        kept.append({"uid": uid, "ten": ten, "purchase": purchase, "completed": completed,
                      "today_rows": todays_lessons(items, today),
-                     "week_rows": week_lessons(items, monday, sunday)})
+                     "week_rows": wk})
 
     done_n = 0
     with httpx.Client() as client:
