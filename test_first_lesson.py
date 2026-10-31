@@ -198,43 +198,50 @@ class _FakeSheets:
         return {"values": self._values}
 
 
-def test_read_cs_notes_anchors_by_uid():
-    # Danh sách chờ: UID cột B(1), cột CS = H,I (7,8)
+def test_read_cs_notes_by_header_name():
+    # Dò cột theo TÊN header -> đổi layout không lệch. header dòng 1, data dòng 2.
+    header = ["Tên bé", "UID", "SĐT", "GVCN", "Ngày mua", "Có buổi hôm nay?",
+              "Giờ hôm nay", "Trạng thái CS", "Ghi chú CS"]
     rows = [
+        header,
         ["Gold", "3321114530", "84-886110888", "Ellie", "2026-10-27", "Có", "18:00",
          "Đã gọi", "mẹ bận, hẹn mai"],
         ["", "3319622906", "84-902569605", "Tran Thu Ha", "2026-10-27", "", "",
          "Chưa gọi", ""],
-        ["x", "3320033660", "", "", "2026-10-23", "", "", "", ""],  # không note -> bỏ
-        ["x", "84-placeholder", "", "", "", "", "", "Đã gọi", ""],   # uid rác -> bỏ
+        ["x", "3320033660", "", "", "2026-10-23", "", "", "", ""],   # không note -> bỏ
+        ["x", "84-placeholder", "", "", "", "", "", "Đã gọi", ""],    # uid rác -> bỏ
     ]
-    out = read_cs_notes(_FakeSheets(rows), "sid", "Danh sách chờ", 2, 1, 7)
+    out = read_cs_notes(_FakeSheets(rows), "sid", "Danh sách chờ", 1, 2)
     assert out == {
         "3321114530": ["Đã gọi", "mẹ bận, hẹn mai"],
         "3319622906": ["Chưa gọi", ""],
     }, out
 
 
-# --- build_log_rows: tích luỹ log buổi đầu, dedup (Ngày,UID), giữ ghi chú CS ---
-def _wt(uid, ten, hh, mm):
+# --- build_log_rows: log theo buổi đầu trong tuần, dedup (Ngày,UID), snapshot CS ---
+def _wk(uid, ten, hh, mm, date="2026-10-29"):
+    dk = dt.date.fromisoformat(date).toordinal() * 10000 + hh * 60 + mm
     return {"uid": uid, "ten": ten, "purchase": NOW,
-            "today_rows": [{"hhmm": f"{hh:02d}:{mm:02d}", "mins": hh * 60 + mm,
-                            "status": "Chờ lên lớp", "teacher": "T. A"}]}
+            "week_rows": [{"date": date, "dkey": dk, "hhmm": f"{hh:02d}:{mm:02d}",
+                           "status": "Chờ lên lớp", "teacher": "T. A"}]}
 
 
-def test_build_log_dedup_and_preserve():
+def test_build_log_dedup_and_cs_snapshot():
     old = [
         ["2026-10-28", "Bé Cũ", "3300000001", "84-1", "GV1", "10:00", "T", "Chờ",
-         "Đã gọi", "note cũ"],
+         "", ""],   # chưa có ghi chú CS
         ["2026-10-29", "Trùng", "3300000002", "", "", "09:00", "T", "Chờ", "", ""],
     ]
     profiles = {"3300000003": {"sdt": "84-3", "gvcn": "GV3"}}
-    wt = [_wt("3300000002", "Trùng", 9, 0),    # (2026-10-29, ..2) đã có -> bỏ
-          _wt("3300000003", "Bé Mới", 8, 30)]
-    out = build_log_rows(old, wt, "2026-10-29", profiles)
+    care = {"3300000001": ["done", "ok"], "3300000003": ["Chưa gọi", ""]}
+    students = [_wk("3300000002", "Trùng", 9, 0),    # (2026-10-29, ..2) đã có -> bỏ
+                _wk("3300000003", "Bé Mới", 8, 30)]
+    out = build_log_rows(old, students, profiles, care)
     assert out[0][:6] == ["2026-10-29", "Bé Mới", "3300000003", "84-3", "GV3", "08:30"], out[0]
-    assert len(out) == 3, out                       # 2 cũ + 1 mới (không nhân đôi)
-    assert out[1][8:10] == ["Đã gọi", "note cũ"]     # ghi chú CS dòng cũ giữ nguyên
+    assert out[0][8:10] == ["Chưa gọi", ""]          # bé mới: snapshot ghi chú CS từ care
+    assert len(out) == 3, out                        # 2 cũ + 1 mới (dedup ..2)
+    old1 = [r for r in out if r[2] == "3300000001"][0]
+    assert old1[8:10] == ["done", "ok"]              # dòng cũ: CẬP NHẬT ghi chú CS từ care
 
 
 def test_week_bounds_monday_sunday():

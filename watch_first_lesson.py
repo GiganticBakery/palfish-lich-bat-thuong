@@ -424,40 +424,49 @@ def write_health(svc, sheet_id: str, status: str, detail: str):
 CS_COLS = ["Trạng thái CS", "Ghi chú CS"]
 
 
-def read_cs_notes(svc, sheet_id: str, tab: str, data_row1: int,
-                  uid_col: int, cs_col0: int) -> dict[str, list]:
-    """Đọc 2 cột CS tự điền hiện có -> {uid: [trạng_thái, ghi_chú]} để ghi lại.
+CS_STATUS_HDR, CS_NOTE_HDR = "Trạng thái CS", "Ghi chú CS"
 
-    data_row1 = dòng (1-based) bắt đầu data; uid_col/cs_col0 = chỉ số cột (0-based).
-    Nhờ neo theo UID nên ghi chú luôn theo đúng bé dù dòng sắp xếp lại.
+
+def read_cs_notes(svc, sheet_id: str, tab: str, header_row1: int,
+                  data_row1: int) -> dict[str, list]:
+    """Đọc 2 cột CS tự điền -> {uid: [trạng_thái, ghi_chú]}.
+
+    Dò cột theo TÊN HEADER ("UID", "Trạng thái CS", "Ghi chú CS") chứ KHÔNG dùng
+    chỉ số cứng — nên đổi layout (thêm/bớt cột) không làm lệch/mất ghi chú CS.
+    Neo theo UID nên ghi chú luôn theo đúng bé dù dòng sắp xếp lại.
     """
     try:
         res = svc.spreadsheets().values().get(
-            spreadsheetId=sheet_id, range=f"'{tab}'!A{data_row1}:Z").execute()
+            spreadsheetId=sheet_id, range=f"'{tab}'!A{header_row1}:Z").execute()
     except Exception:
         return {}
+    vals = res.get("values", [])
+    if not vals:
+        return {}
+    header = [str(h).strip() for h in vals[0]]
+
+    def _col(name):
+        return header.index(name) if name in header else None
+
+    ci_uid, ci_st, ci_nt = _col("UID"), _col(CS_STATUS_HDR), _col(CS_NOTE_HDR)
+    if ci_uid is None or (ci_st is None and ci_nt is None):
+        return {}
     out: dict[str, list] = {}
-    for row in res.get("values", []):
-        uid = _clean_uid(row[uid_col]) if len(row) > uid_col else None
+    for row in vals[(data_row1 - header_row1):]:
+        uid = _clean_uid(row[ci_uid]) if len(row) > ci_uid else None
         if not uid:
             continue
-        st = row[cs_col0] if len(row) > cs_col0 else ""
-        nt = row[cs_col0 + 1] if len(row) > cs_col0 + 1 else ""
+        st = row[ci_st] if (ci_st is not None and len(row) > ci_st) else ""
+        nt = row[ci_nt] if (ci_nt is not None and len(row) > ci_nt) else ""
         if st or nt:
             out[uid] = [st, nt]
     return out
 
 
-def write_sheet(svc, sheet_id: str, tabs: dict, kept: list[dict], profiles: dict[str, dict]):
-    """kept: [{uid, ten, purchase, today_rows}] — bé mới chưa học buổi nào.
-    profiles: {uid: {gvcn, sdt}} — bổ sung GVCN (CS phụ trách) + SĐT phụ huynh."""
+def write_sheet(svc, sheet_id, tabs, kept, profiles, care_cs, wait_cs):
+    """kept: [{uid, ten, purchase, today_rows, week_rows, completed}].
+    care_cs/wait_cs: {uid: [trạng_thái, ghi_chú]} ghi chú CS đã đọc (neo UID) -> ghi lại."""
     now_vn = dt.datetime.now(VN_TZ).strftime("%Y-%m-%d %H:%M:%S")
-
-    # giữ ghi chú CS hiện có (neo theo UID) trước khi clear + ghi lại
-    # Cần chăm tuần này: data từ dòng 5, UID cột B(1), cột CS = J,K (9,10)
-    # Danh sách chờ:     data từ dòng 2, UID cột B(1), cột CS = H,I (7,8)
-    care_cs = read_cs_notes(svc, sheet_id, SHEET_CARE, 5, 1, 9)
-    wait_cs = read_cs_notes(svc, sheet_id, SHEET_WAITING, 2, 1, 7)
 
     def _sdt(uid):
         return (profiles.get(uid) or {}).get("sdt", "")
@@ -562,18 +571,26 @@ LOG_HEADER = ["Ngày", "Tên bé", "UID", "SĐT", "GVCN", "Giờ học (VN)",
               "GV dạy buổi", "Trạng thái", "Trạng thái CS", "Ghi chú CS"]
 
 
-def _today_log_row(k, today_str, profiles):
-    gio = ", ".join(r["hhmm"] for r in k["today_rows"])
-    gv = " / ".join(sorted({r["teacher"] for r in k["today_rows"] if r["teacher"]}))
-    tt = " / ".join(sorted({r["status"] for r in k["today_rows"]}))
+def _week_log_row(k, profiles, care):
+    """1 dòng log cho bé: Ngày = buổi SỚM NHẤT trong tuần (buổi đầu), kèm ghi chú CS."""
+    wr = k["week_rows"]
+    d0 = wr[0]["date"]
+    same = [r for r in wr if r["date"] == d0]
+    gio = ", ".join(r["hhmm"] for r in same)
+    gv = " / ".join(sorted({r["teacher"] for r in same if r["teacher"]}))
+    tt = " / ".join(sorted({r["status"] for r in same}))
     p = profiles.get(k["uid"], {})
-    return [today_str, k["ten"], k["uid"], p.get("sdt", ""), p.get("gvcn", ""),
-            gio, gv, tt, "", ""]
+    cs = care.get(k["uid"], ["", ""])
+    return [d0, k["ten"], k["uid"], p.get("sdt", ""), p.get("gvcn", ""),
+            gio, gv, tt, cs[0], cs[1]]
 
 
-def build_log_rows(old_rows, with_today, today_str, profiles):
-    """Dòng log cũ (giữ nguyên, kèm ghi chú CS) + dòng mới hôm nay (dedup theo
-    (Ngày, UID), bé mới lên đầu). Pure — test không cần mạng. Cắt còn LOG_MAX."""
+def build_log_rows(old_rows, students, profiles, care):
+    """Dòng log cũ (giữ, CẬP NHẬT ghi chú CS mới nhất theo UID) + dòng mới (dedup
+    theo (Ngày buổi đầu, UID), bé mới lên đầu). Pure. Cắt còn LOG_MAX.
+
+    care = {uid: [trạng_thái, ghi_chú]} từ tab chăm -> SNAPSHOT vào log để giữ lịch
+    sử CS dù bé đã rời tab chăm (hết tuần)."""
     width = len(LOG_HEADER)
     seen, kept_old = set(), []
     for r in old_rows:
@@ -581,26 +598,29 @@ def build_log_rows(old_rows, with_today, today_str, profiles):
         uid = _clean_uid(r[2])
         if uid:
             seen.add((r[0], uid))
+            cs = care.get(uid)
+            if cs and (cs[0] or cs[1]):      # có ghi chú CS mới -> cập nhật vào dòng log
+                r[8], r[9] = cs[0], cs[1]
         kept_old.append(r)
     new_rows = []
-    for k in sorted(with_today, key=lambda k: k["today_rows"][0]["mins"]):
-        key = (today_str, k["uid"])
+    for k in sorted(students, key=lambda k: k["week_rows"][0]["dkey"]):
+        key = (k["week_rows"][0]["date"], k["uid"])
         if key in seen:
             continue
         seen.add(key)
-        new_rows.append(_today_log_row(k, today_str, profiles))
+        new_rows.append(_week_log_row(k, profiles, care))
     return (new_rows + kept_old)[:LOG_MAX]
 
 
-def write_log(svc, sheet_id, tabs, kept, today, profiles):
-    with_today = [k for k in kept if k["today_rows"]]
+def write_log(svc, sheet_id, tabs, kept, profiles, care):
+    students = [k for k in kept if k.get("week_rows")]
     try:
         res = svc.spreadsheets().values().get(
             spreadsheetId=sheet_id, range=f"'{LOG_TAB}'!A2:J").execute()
         old = res.get("values", [])
     except Exception:
         old = []
-    rows = build_log_rows(old, with_today, today.strftime("%Y-%m-%d"), profiles)
+    rows = build_log_rows(old, students, profiles, care)
     svc.spreadsheets().values().batchClear(
         spreadsheetId=sheet_id, body={"ranges": [f"'{LOG_TAB}'!A1:J{LOG_MAX + 10}"]}).execute()
     svc.spreadsheets().values().update(
@@ -835,8 +855,11 @@ def main():
     write_profile(svc, sheet_id, profiles)
 
     write_pool(svc, sheet_id, new_pool)
-    write_sheet(svc, sheet_id, tabs, kept, profiles)
-    write_log(svc, sheet_id, tabs, kept, today, profiles)
+    # Đọc ghi chú CS 1 lần (dò cột theo tên header) rồi dùng cho cả sheet + log.
+    care_cs = read_cs_notes(svc, sheet_id, SHEET_CARE, 4, 5)   # header dòng 4, data dòng 5
+    wait_cs = read_cs_notes(svc, sheet_id, SHEET_WAITING, 1, 2)
+    write_sheet(svc, sheet_id, tabs, kept, profiles, care_cs, wait_cs)
+    write_log(svc, sheet_id, tabs, kept, profiles, care_cs)
     write_health(svc, sheet_id, "OK",
                  f"Quét {len(to_scan)} bé · pool còn {len(new_pool)} đang chờ · "
                  f"{kept_week} bé có buổi tuần này ({kept_today} hôm nay).")
