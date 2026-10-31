@@ -255,6 +255,16 @@ def week_lessons(items: list[dict], monday: dt.date, sunday: dt.date) -> list[di
     return rows
 
 
+def care_sort_key(week_rows: list[dict], today: dt.date):
+    """Khoá sắp xếp tab chăm: buổi SẮP TỚI gần nhất lên đầu (CS chăm trước), rồi
+    tới buổi ĐÃ QUA trong tuần (gần nhất trước). dkey = ngày.toordinal()*10000+phút."""
+    today_ord = today.toordinal()
+    upcoming = [r["dkey"] for r in week_rows if r["dkey"] // 10000 >= today_ord]
+    if upcoming:
+        return (0, min(upcoming))                       # có buổi sắp tới -> trên, sớm nhất đầu
+    return (1, -max(r["dkey"] for r in week_rows))       # chỉ buổi đã qua -> dưới, gần nhất trước
+
+
 # ---------------------------------------------------------------------------
 # Supabase: kéo toàn bộ (uid, pay_time, is_test) của so_doanh_thu
 # ---------------------------------------------------------------------------
@@ -493,7 +503,8 @@ def write_sheet(svc, sheet_id, tabs, kept, profiles, care_cs, wait_cs):
     def _cs(notes, uid):
         return notes.get(uid, ["", ""])
 
-    monday, sunday = week_bounds(dt.datetime.now(VN_TZ).date())
+    today_vn = dt.datetime.now(VN_TZ).date()
+    monday, sunday = week_bounds(today_vn)
     with_week = [k for k in kept if k.get("week_rows")]
 
     # ----- Tab Cần chăm tuần này (T2–CN) -----
@@ -507,7 +518,7 @@ def write_sheet(svc, sheet_id, tabs, kept, profiles, care_cs, wait_cs):
         ["Tên bé", "UID", "SĐT", "GVCN", "Ngày học", "Giờ học (VN)", "GV dạy buổi",
          "Trạng thái", "Ngày mua"] + CS_COLS,
     ]
-    for k in sorted(with_week, key=lambda k: k["week_rows"][0]["dkey"]):
+    for k in sorted(with_week, key=lambda k: care_sort_key(k["week_rows"], today_vn)):
         wr = k["week_rows"]
         ngay = ", ".join(dict.fromkeys(r["date"] for r in wr))   # ngày distinct, giữ thứ tự
         gio = ", ".join(r["hhmm"] for r in wr)
