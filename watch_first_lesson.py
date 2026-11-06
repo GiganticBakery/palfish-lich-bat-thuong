@@ -368,7 +368,7 @@ def write_pool(svc, sheet_id: str, pool: dict[str, dict]):
 def read_profile(svc, sheet_id: str) -> dict[str, dict]:
     try:
         res = svc.spreadsheets().values().get(
-            spreadsheetId=sheet_id, range=f"'{PROFILE_TAB}'!A2:D").execute()
+            spreadsheetId=sheet_id, range=f"'{PROFILE_TAB}'!A2:E").execute()
     except Exception:
         return {}
     prof: dict[str, dict] = {}
@@ -378,16 +378,18 @@ def read_profile(svc, sheet_id: str) -> dict[str, dict]:
             tries = row[3] if len(row) > 3 else "0"
             prof[uid] = {"gvcn": (row[1] if len(row) > 1 else "") or "",
                          "sdt": (row[2] if len(row) > 2 else "") or "",
-                         "sdt_tries": int(tries) if str(tries).strip().isdigit() else 0}
+                         "sdt_tries": int(tries) if str(tries).strip().isdigit() else 0,
+                         "owner": (row[4] if len(row) > 4 else "") or ""}
     return prof
 
 
 def write_profile(svc, sheet_id: str, profiles: dict[str, dict]):
-    values = [["uid", "gvcn", "sdt", "sdt_tries"]]
+    values = [["uid", "gvcn", "sdt", "sdt_tries", "owner"]]
     for uid, v in sorted(profiles.items()):
-        values.append([uid, v.get("gvcn", ""), v.get("sdt", ""), v.get("sdt_tries", 0)])
+        values.append([uid, v.get("gvcn", ""), v.get("sdt", ""), v.get("sdt_tries", 0),
+                       v.get("owner", "")])
     svc.spreadsheets().values().batchClear(
-        spreadsheetId=sheet_id, body={"ranges": [f"'{PROFILE_TAB}'!A1:D20000"]}).execute()
+        spreadsheetId=sheet_id, body={"ranges": [f"'{PROFILE_TAB}'!A1:E20000"]}).execute()
     svc.spreadsheets().values().update(
         spreadsheetId=sheet_id, range=f"'{PROFILE_TAB}'!A1",
         valueInputOption="RAW", body={"values": values}).execute()
@@ -422,6 +424,72 @@ def fetch_phone(client, headers, uid) -> str | None:
         return (((j.get("data") or {}).get("ent") or {}).get("phone") or "").strip()
     except Exception:
         return None
+
+
+# ---------------------------------------------------------------------------
+# Owner (CS SỞ HỮU thật) từ CS app — nguồn authoritative, KHÁC head_teacher trên
+# CRM (CRM trả tên advisor/sale khi lead chưa gán GVCN). Dùng để: (1) để TRỐNG cột
+# GVCN khi CRM chưa gán đúng CS; (2) điền cột "GVCN cần gắn" cho CS lên CRM gắn bù.
+# Endpoint giống backend GMV (cs_gvcn_client): GET ?resource=gvcn_sync&uids=...
+# header x-cs-sync-key. Cần 2 env PALFISH_CS_SYNC_URL + PALFISH_CS_SYNC_KEY.
+# ---------------------------------------------------------------------------
+def cs_sync_configured() -> bool:
+    """True nếu đã cấu hình đủ 2 env để gọi CS app (bật tính năng owner)."""
+    return bool((os.getenv("PALFISH_CS_SYNC_URL") or "").strip()
+                and (os.getenv("PALFISH_CS_SYNC_KEY") or "").strip())
+
+
+def fetch_cs_owner(uids, client=None) -> dict[str, str]:
+    """{uid: tên CS sở hữu} từ CS app (batch, nhận tới 500 uid/call). Rỗng nếu thiếu
+    cấu hình / lỗi mạng (degrade an toàn — KHÔNG chặn luồng). KHÔNG đụng CRM nên
+    không ảnh hưởng rate-limit cổng SĐT."""
+    base = (os.getenv("PALFISH_CS_SYNC_URL") or "").strip().rstrip("/")
+    key = (os.getenv("PALFISH_CS_SYNC_KEY") or "").strip()
+    clean = [u for u in dict.fromkeys(str(x).strip() for x in uids) if u]
+    if not clean or not base or not key:
+        return {}
+    own = client or httpx.Client()
+    out: dict[str, str] = {}
+    try:
+        for i in range(0, len(clean), 500):
+            chunk = clean[i:i + 500]
+            r = own.get(base, params={"resource": "gvcn_sync", "uids": ",".join(chunk)},
+                        headers={"x-cs-sync-key": key}, timeout=15)
+            for a in (r.json().get("assignments") or []):
+                uid = str(a.get("uid") or "").strip()
+                gvcn = str(a.get("gvcn") or "").strip()
+                if uid and gvcn:
+                    out[uid] = gvcn
+    except Exception as exc:  # noqa: BLE001 — non-fatal
+        print(f"[cs_owner] fetch lỗi (bỏ qua): {exc}")
+    finally:
+        if client is None:
+            own.close()
+    return out
+
+
+def owner_display_on(profiles: dict, uids, owner_on: bool) -> bool:
+    """Chỉ áp luật 'để trống GVCN' khi THẬT SỰ có dữ liệu owner (ít nhất 1 bé).
+    owner_on nhưng endpoint trả 0 owner (sai secret / lỗi mạng) -> False -> giữ
+    head_teacher như cũ, TRÁNH xoá trắng cả cột GVCN trên sheet."""
+    if not owner_on:
+        return False
+    return any((profiles.get(u) or {}).get("owner") for u in uids)
+
+
+def resolve_gvcn(prof: dict, owner_on: bool) -> tuple[str, str]:
+    """(GVCN hiển thị, GVCN cần gắn) cho 1 bé. prof = {'gvcn': head_teacher CRM,
+    'owner': CS sở hữu từ CS app, ...}.
+    - owner_on False (chưa bật nguồn owner / chưa có secret): giữ head_teacher như cũ.
+    - owner_on True: CHỈ hiện GVCN khi CRM đã gán đúng CS sở hữu (head_teacher==owner);
+      còn lại (advisor / trống / lệch / không rõ owner) -> để TRỐNG, và nêu owner ở
+      cột 'GVCN cần gắn' (rỗng nếu cũng không biết owner)."""
+    ht = (prof.get("gvcn") or "").strip()
+    owner = (prof.get("owner") or "").strip()
+    if not owner_on:
+        return ht, ""
+    gv = ht if (ht and ht == owner) else ""
+    return gv, (owner if not gv else "")
 
 
 def write_health(svc, sheet_id: str, status: str, detail: str):
@@ -493,7 +561,7 @@ def read_cs_notes(svc, sheet_id: str, tab: str, header_row1: int,
     return out
 
 
-def write_sheet(svc, sheet_id, tabs, kept, profiles, care_cs, wait_cs):
+def write_sheet(svc, sheet_id, tabs, kept, profiles, care_cs, wait_cs, owner_on=False):
     """kept: [{uid, ten, purchase, today_rows, week_rows, completed}].
     care_cs/wait_cs: {uid: [trạng_thái, ghi_chú]} ghi chú CS đã đọc (neo UID) -> ghi lại."""
     now_vn = dt.datetime.now(VN_TZ).strftime("%Y-%m-%d %H:%M:%S")
@@ -501,8 +569,8 @@ def write_sheet(svc, sheet_id, tabs, kept, profiles, care_cs, wait_cs):
     def _sdt(uid):
         return (profiles.get(uid) or {}).get("sdt", "")
 
-    def _gvcn(uid):
-        return (profiles.get(uid) or {}).get("gvcn", "")
+    def _gv2(uid):   # (GVCN hiển thị, GVCN cần gắn)
+        return resolve_gvcn(profiles.get(uid) or {}, owner_on)
 
     def _cs(notes, uid):
         return notes.get(uid, ["", ""])
@@ -519,8 +587,8 @@ def write_sheet(svc, sheet_id, tabs, kept, profiles, care_cs, wait_cs):
         [banner],
         [f"Cập nhật lúc: {now_vn} (giờ VN) · quét mỗi 30 phút · 8h30–22h · mốc T2–CN"],
         [],
-        ["Tên bé", "UID", "SĐT", "GVCN", "Ngày học", "Giờ học (VN)", "GV dạy buổi",
-         "Trạng thái", "Ngày mua"] + CS_COLS,
+        ["Tên bé", "UID", "SĐT", "GVCN", "GVCN cần gắn", "Ngày học", "Giờ học (VN)",
+         "GV dạy buổi", "Trạng thái", "Ngày mua"] + CS_COLS,
     ]
     # 1 bé = 1 dòng = ĐÚNG buổi đầu (buổi sớm nhất tuần). Nếu buổi đầu ngày đó có
     # nhiều slot thì gộp giờ của riêng ngày đó; KHÔNG gộp các ngày khác nhau.
@@ -530,22 +598,24 @@ def write_sheet(svc, sheet_id, tabs, kept, profiles, care_cs, wait_cs):
         d0 = wr[0]["date"]
         same = [r for r in wr if r["date"] == d0]          # chỉ slot của buổi đầu
         gio = ", ".join(r["hhmm"] for r in same)
-        gv = " / ".join(sorted({r["teacher"] for r in same if r["teacher"]}))
+        gv_day = " / ".join(sorted({r["teacher"] for r in same if r["teacher"]}))
         tt = " / ".join(sorted({r["status"] for r in same}))
-        care_values.append([k["ten"], k["uid"], _sdt(k["uid"]), _gvcn(k["uid"]),
-                            d0, gio, gv, tt, k["purchase"].strftime("%Y-%m-%d")]
+        gvcn, can_gan = _gv2(k["uid"])
+        care_values.append([k["ten"], k["uid"], _sdt(k["uid"]), gvcn, can_gan,
+                            d0, gio, gv_day, tt, k["purchase"].strftime("%Y-%m-%d")]
                            + _cs(care_cs, k["uid"]))
     if not with_week:
         care_values.append(["— không có —"])
 
     # ----- Tab Danh sách chờ (bé mới CHƯA học buổi nào) -----
     waiting = [k for k in kept if not k.get("completed")]   # bỏ bé đã học xong buổi đầu
-    wait_header = ["Tên bé", "UID", "SĐT", "GVCN", "Ngày mua",
+    wait_header = ["Tên bé", "UID", "SĐT", "GVCN", "GVCN cần gắn", "Ngày mua",
                    "Có buổi hôm nay?", "Giờ hôm nay"] + CS_COLS
     wait_values = [wait_header]
     for k in sorted(waiting, key=lambda k: k["purchase"], reverse=True):
         gio = ", ".join(r["hhmm"] for r in k["today_rows"]) if k["today_rows"] else ""
-        wait_values.append([k["ten"], k["uid"], _sdt(k["uid"]), _gvcn(k["uid"]),
+        gvcn, can_gan = _gv2(k["uid"])
+        wait_values.append([k["ten"], k["uid"], _sdt(k["uid"]), gvcn, can_gan,
                             k["purchase"].strftime("%Y-%m-%d"),
                             "Có" if k["today_rows"] else "", gio]
                            + _cs(wait_cs, k["uid"]))
@@ -573,10 +643,10 @@ def write_sheet(svc, sheet_id, tabs, kept, profiles, care_cs, wait_cs):
         {"unmergeCells": {"range": {"sheetId": tid, "startRowIndex": 0, "endRowIndex": 1,
                                     "startColumnIndex": 0, "endColumnIndex": 26}}},
         {"mergeCells": {"range": {"sheetId": tid, "startRowIndex": 0, "endRowIndex": 1,
-                                  "startColumnIndex": 0, "endColumnIndex": 11}, "mergeType": "MERGE_ALL"}},
+                                  "startColumnIndex": 0, "endColumnIndex": 12}, "mergeType": "MERGE_ALL"}},
         {"repeatCell": {
             "range": {"sheetId": tid, "startRowIndex": 0, "endRowIndex": 1,
-                      "startColumnIndex": 0, "endColumnIndex": 11},
+                      "startColumnIndex": 0, "endColumnIndex": 12},
             "cell": {"userEnteredFormat": {
                 "backgroundColor": blue if with_week else green,
                 "textFormat": {"bold": True, "fontSize": 13},
@@ -606,8 +676,9 @@ LOG_HEADER = ["Ngày", "Tên bé", "UID", "SĐT", "GVCN", "Giờ học (VN)",
               "GV dạy buổi", "Trạng thái", "Trạng thái CS", "Ghi chú CS"]
 
 
-def _week_log_row(k, profiles, care):
-    """1 dòng log cho bé: Ngày = buổi SỚM NHẤT trong tuần (buổi đầu), kèm ghi chú CS."""
+def _week_log_row(k, profiles, care, owner_on=False):
+    """1 dòng log cho bé: Ngày = buổi SỚM NHẤT trong tuần (buổi đầu), kèm ghi chú CS.
+    GVCN để trống khi CRM chưa gán đúng CS sở hữu (owner_on) — như tab chăm."""
     wr = k["week_rows"]
     d0 = wr[0]["date"]
     same = [r for r in wr if r["date"] == d0]
@@ -616,11 +687,12 @@ def _week_log_row(k, profiles, care):
     tt = " / ".join(sorted({r["status"] for r in same}))
     p = profiles.get(k["uid"], {})
     cs = care.get(k["uid"], ["", ""])
-    return [d0, k["ten"], k["uid"], p.get("sdt", ""), p.get("gvcn", ""),
+    gvcn, _ = resolve_gvcn(p, owner_on)
+    return [d0, k["ten"], k["uid"], p.get("sdt", ""), gvcn,
             gio, gv, tt, cs[0], cs[1]]
 
 
-def build_log_rows(old_rows, students, profiles, care):
+def build_log_rows(old_rows, students, profiles, care, owner_on=False):
     """Dòng log cũ (giữ, CẬP NHẬT ghi chú CS mới nhất theo UID) + dòng mới (dedup
     theo (Ngày buổi đầu, UID), bé mới lên đầu). Pure. Cắt còn LOG_MAX.
 
@@ -643,11 +715,11 @@ def build_log_rows(old_rows, students, profiles, care):
         if key in seen:
             continue
         seen.add(key)
-        new_rows.append(_week_log_row(k, profiles, care))
+        new_rows.append(_week_log_row(k, profiles, care, owner_on))
     return (new_rows + kept_old)[:LOG_MAX]
 
 
-def write_log(svc, sheet_id, tabs, kept, profiles, care):
+def write_log(svc, sheet_id, tabs, kept, profiles, care, owner_on=False):
     students = [k for k in kept if k.get("week_rows")]
     try:
         res = svc.spreadsheets().values().get(
@@ -655,7 +727,7 @@ def write_log(svc, sheet_id, tabs, kept, profiles, care):
         old = res.get("values", [])
     except Exception:
         old = []
-    rows = build_log_rows(old, students, profiles, care)
+    rows = build_log_rows(old, students, profiles, care, owner_on)
     svc.spreadsheets().values().batchClear(
         spreadsheetId=sheet_id, body={"ranges": [f"'{LOG_TAB}'!A1:J{LOG_MAX + 10}"]}).execute()
     svc.spreadsheets().values().update(
@@ -841,7 +913,23 @@ def main():
     phone_max_tries = int(os.getenv("FIRST_LESSON_PHONE_MAX_TRIES") or "5")
 
     def _p(uid):
-        return profiles.setdefault(uid, {"gvcn": "", "sdt": "", "sdt_tries": 0})
+        return profiles.setdefault(uid, {"gvcn": "", "sdt": "", "sdt_tries": 0, "owner": ""})
+
+    # Owner (CS sở hữu thật) từ CS app gvcn_sync — batch 1 call cho mọi bé, KHÔNG đụng
+    # CRM. Chỉ ghi đè owner các uid có trong response (giữ cache khi lỗi tạm thời).
+    owner_on = cs_sync_configured()
+    if owner_on:
+        omap = fetch_cs_owner([k["uid"] for k in kept])
+        for uid, name in omap.items():
+            _p(uid)["owner"] = name
+        print(f"[cs_owner] owner lấy {len(omap)}/{len(kept)} bé", flush=True)
+    else:
+        print("[cs_owner] chưa cấu hình PALFISH_CS_SYNC_URL/KEY -> giữ GVCN như cũ", flush=True)
+    # Chỉ bật luật 'để trống' khi có owner thật -> endpoint 0 owner thì KHÔNG xoá cột.
+    owner_live = owner_display_on(profiles, [k["uid"] for k in kept], owner_on)
+    if owner_on and not owner_live:
+        print("[cs_owner] 0 owner (sai secret / endpoint lỗi?) -> giữ head_teacher, "
+              "KHÔNG xoá cột GVCN lượt này", flush=True)
 
     need_gvcn = [k["uid"] for k in kept if not _p(k["uid"])["gvcn"]][:gvcn_limit]
     week_uids = [k["uid"] for k in kept if k.get("week_rows")]   # bé hiện trong tab tuần
@@ -894,8 +982,8 @@ def main():
     # Đọc ghi chú CS 1 lần (dò cột theo tên header) rồi dùng cho cả sheet + log.
     care_cs = read_cs_notes(svc, sheet_id, SHEET_CARE, 4, 5)   # header dòng 4, data dòng 5
     wait_cs = read_cs_notes(svc, sheet_id, SHEET_WAITING, 1, 2)
-    write_sheet(svc, sheet_id, tabs, kept, profiles, care_cs, wait_cs)
-    write_log(svc, sheet_id, tabs, kept, profiles, care_cs)
+    write_sheet(svc, sheet_id, tabs, kept, profiles, care_cs, wait_cs, owner_live)
+    write_log(svc, sheet_id, tabs, kept, profiles, care_cs, owner_live)
     write_health(svc, sheet_id, "OK",
                  f"Quét {len(to_scan)} bé · pool còn {len(new_pool)} đang chờ · "
                  f"{kept_week} bé có buổi tuần này ({kept_today} hôm nay).")
