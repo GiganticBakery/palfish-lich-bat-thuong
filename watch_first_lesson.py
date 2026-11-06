@@ -455,11 +455,32 @@ def fetch_cs_owner(uids, client=None) -> dict[str, str]:
             chunk = clean[i:i + 500]
             r = own.get(base, params={"resource": "gvcn_sync", "uids": ",".join(chunk)},
                         headers={"x-cs-sync-key": key}, timeout=15)
-            for a in (r.json().get("assignments") or []):
+            try:
+                j = r.json()
+            except Exception:
+                j = None
+            assigns = (j.get("assignments") or []) if isinstance(j, dict) else []
+            for a in assigns:
                 uid = str(a.get("uid") or "").strip()
                 gvcn = str(a.get("gvcn") or "").strip()
                 if uid and gvcn:
                     out[uid] = gvcn
+            # Chẩn đoán KHI RỖNG (lô đầu): chỉ status + keys + 200 ký tự đầu (0 assignment
+            # nên KHÔNG có tên/dữ liệu bé). Giúp phân biệt sai auth/URL vs endpoint rỗng.
+            if not assigns and i == 0:
+                st = getattr(r, "status_code", "?")
+                try:
+                    ct = r.headers.get("content-type", "")
+                except Exception:
+                    ct = ""
+                keys = list(j.keys()) if isinstance(j, dict) else type(j).__name__
+                try:
+                    body = (r.text or "")[:200]
+                except Exception:
+                    body = ""
+                host = base.split("//", 1)[-1].split("/", 1)[0]
+                print(f"[cs_owner] debug rỗng: HTTP {st} host={host} ct={ct} "
+                      f"keys={keys} body[:200]={body!r}", flush=True)
     except Exception as exc:  # noqa: BLE001 — non-fatal
         print(f"[cs_owner] fetch lỗi (bỏ qua): {exc}")
     finally:
