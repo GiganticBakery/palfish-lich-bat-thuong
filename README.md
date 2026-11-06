@@ -129,11 +129,20 @@ tab ẩn _pool (bé đang chờ, lần chạy trước)  ───┘      → �
   thời điểm mua = 0. **Vắng (101) không tính** là đã học.
 - **Pool** (tab ẩn `_pool`): giữ danh sách bé đang chờ qua các lần chạy nên mỗi
   lần chỉ quét CRM nhóm nhỏ, không quét lại toàn bộ (~522) học viên mới.
-- **SĐT + GVCN** (2 cột trên cả 2 tab): tra per-UID từ CRM —
-  `leads/leadsinfo/get` → GVCN = `leads_info.head_teacher.name` (CS phụ trách,
-  **KHÁC** `sale` = NV bán hàng); `leads/leadsphone/get` → SĐT đầy đủ
+- **SĐT + GVCN + GVCN cần gắn** (các cột trên tab chăm/chờ): tra per-UID từ CRM —
+  `leads/leadsinfo/get` → `head_teacher.name`; `leads/leadsphone/get` → SĐT đầy đủ
   (`data.ent.phone`; SĐT trong leadsinfo bị che nên không dùng). Cache tab ẩn
-  `_profile` (uid, gvcn, sdt, sdt_tries).
+  `_profile` (uid, gvcn, sdt, sdt_tries, **owner**).
+  - ⚠️ **Gốc bug GVCN**: khi lead **chưa gán** GVCN trên CRM, `head_teacher.name`
+    CRM trả về **tên advisor/sale** (Ellie Advisor, Ruby Advisor…) → hiện sai.
+  - **Nguồn owner thật** = CS app `?resource=gvcn_sync` (giống backend GMV
+    `cs_gvcn_client`), batch 1 call/lượt, trả `{uid: tên CS sở hữu}`. Cần 2 secret
+    **`PALFISH_CS_SYNC_URL`** + **`PALFISH_CS_SYNC_KEY`** (copy từ Render của GMV).
+  - **Luật** (`resolve_gvcn`): cột **GVCN** chỉ hiện khi CRM đã gán đúng CS sở hữu
+    (`head_teacher == owner`); còn lại (advisor / trống / không rõ owner) → **để
+    trống**. Cột **"GVCN cần gắn"** = owner để CS biết lên CRM gắn bù. Chưa cấu hình
+    2 secret → giữ `head_teacher` như cũ (không xoá sạch cột), cột cần gắn trống.
+    KHÔNG đụng CRM nên không ảnh hưởng rate-limit cổng SĐT.
   - ⚠️ **CRM giới hạn tần suất tra SĐT** ("Too many phone number queries", doạ
     khoá cổng). Nên tra SĐT dè: ưu tiên bé **có buổi hôm nay**, cap
     `FIRST_LESSON_PHONE_LIMIT`=25/lượt, nghỉ 1s/lần, tối đa
