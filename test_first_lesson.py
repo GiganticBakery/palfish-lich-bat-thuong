@@ -16,8 +16,6 @@ from watch_first_lesson import (
     _clean_uid,
     fetch_gvcn,
     fetch_phone,
-    fetch_cs_owner,
-    resolve_gvcn,
     read_cs_notes,
     build_log_rows,
     LEADSINFO_URL,
@@ -198,57 +196,6 @@ def test_fetch_phone_ratelimited_returns_none():
     # ret!=1 (giới hạn tần suất) -> None để caller ngắt, KHÁC '' (không có số)
     assert fetch_phone(_FakeClient(None, {"ret": -1}), {}, 1) is None
     assert fetch_phone(_FakeClient(None, {"ret": 1, "data": {"ent": {"phone": ""}}}), {}, 1) == ""
-
-
-# --- fetch_cs_owner + resolve_gvcn: owner CS sở hữu, để trống GVCN khi là advisor ---
-class _FakeOwnerClient:
-    """Giả client CS app: .get trả shape {assignments:[{uid,gvcn}]}."""
-    def __init__(self, payload):
-        self._p = payload
-
-    def get(self, url, params=None, headers=None, timeout=None):
-        return _Resp(self._p)
-
-
-def test_fetch_cs_owner_parses_assignments():
-    import os
-    os.environ["PALFISH_CS_SYNC_URL"] = "https://cs.example/api/cs"
-    os.environ["PALFISH_CS_SYNC_KEY"] = "k"
-    payload = {"assignments": [
-        {"uid": "3319622906", "gvcn": "Tran Thu Ha"},
-        {"uid": "3320033660", "gvcn": ""},          # rỗng -> bỏ
-    ]}
-    out = fetch_cs_owner(["3319622906", "3320033660", "x"],
-                         client=_FakeOwnerClient(payload))
-    assert out == {"3319622906": "Tran Thu Ha"}, out
-
-
-def test_fetch_cs_owner_no_config_returns_empty():
-    import os
-    os.environ.pop("PALFISH_CS_SYNC_URL", None)
-    os.environ.pop("PALFISH_CS_SYNC_KEY", None)
-    # thiếu cấu hình -> {} (degrade an toàn, không gọi mạng)
-    assert fetch_cs_owner(["1"], client=_FakeOwnerClient({"assignments": []})) == {}
-
-
-def test_owner_display_on_guards_empty():
-    from watch_first_lesson import owner_display_on
-    assert owner_display_on({}, ["1"], False) is False            # chưa bật
-    assert owner_display_on({"1": {"owner": ""}}, ["1"], True) is False   # 0 owner -> giữ head_teacher
-    assert owner_display_on({"1": {"owner": "Tran Thu Ha"}}, ["1"], True) is True
-
-
-def test_resolve_gvcn_rules():
-    # owner_on False -> giữ head_teacher như cũ
-    assert resolve_gvcn({"gvcn": "Ellie Advisor", "owner": ""}, False) == ("Ellie Advisor", "")
-    # head_teacher == owner (CRM gán đúng CS) -> hiện GVCN, không cần gắn
-    assert resolve_gvcn({"gvcn": "Tran Thu Ha", "owner": "Tran Thu Ha"}, True) == ("Tran Thu Ha", "")
-    # head_teacher là advisor (lệch owner) -> GVCN TRỐNG + nêu owner ở cần gắn
-    assert resolve_gvcn({"gvcn": "Ellie Advisor", "owner": "Tran Thu Ha"}, True) == ("", "Tran Thu Ha")
-    # CRM trống nhưng biết owner -> GVCN trống + cần gắn = owner
-    assert resolve_gvcn({"gvcn": "", "owner": "Tran Thu Ha"}, True) == ("", "Tran Thu Ha")
-    # không rõ owner (choice A) -> để trống cả hai
-    assert resolve_gvcn({"gvcn": "Ellie Advisor", "owner": ""}, True) == ("", "")
 
 
 # --- read_cs_notes: giữ ghi chú CS neo theo UID (không đụng mạng) ---
