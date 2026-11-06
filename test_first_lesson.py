@@ -231,6 +231,13 @@ def test_fetch_cs_owner_no_config_returns_empty():
     assert fetch_cs_owner(["1"], client=_FakeOwnerClient({"assignments": []})) == {}
 
 
+def test_owner_display_on_guards_empty():
+    from watch_first_lesson import owner_display_on
+    assert owner_display_on({}, ["1"], False) is False            # chưa bật
+    assert owner_display_on({"1": {"owner": ""}}, ["1"], True) is False   # 0 owner -> giữ head_teacher
+    assert owner_display_on({"1": {"owner": "Tran Thu Ha"}}, ["1"], True) is True
+
+
 def test_resolve_gvcn_rules():
     # owner_on False -> giữ head_teacher như cũ
     assert resolve_gvcn({"gvcn": "Ellie Advisor", "owner": ""}, False) == ("Ellie Advisor", "")

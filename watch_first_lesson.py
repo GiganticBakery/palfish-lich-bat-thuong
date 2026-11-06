@@ -468,6 +468,15 @@ def fetch_cs_owner(uids, client=None) -> dict[str, str]:
     return out
 
 
+def owner_display_on(profiles: dict, uids, owner_on: bool) -> bool:
+    """Chỉ áp luật 'để trống GVCN' khi THẬT SỰ có dữ liệu owner (ít nhất 1 bé).
+    owner_on nhưng endpoint trả 0 owner (sai secret / lỗi mạng) -> False -> giữ
+    head_teacher như cũ, TRÁNH xoá trắng cả cột GVCN trên sheet."""
+    if not owner_on:
+        return False
+    return any((profiles.get(u) or {}).get("owner") for u in uids)
+
+
 def resolve_gvcn(prof: dict, owner_on: bool) -> tuple[str, str]:
     """(GVCN hiển thị, GVCN cần gắn) cho 1 bé. prof = {'gvcn': head_teacher CRM,
     'owner': CS sở hữu từ CS app, ...}.
@@ -916,6 +925,11 @@ def main():
         print(f"[cs_owner] owner lấy {len(omap)}/{len(kept)} bé", flush=True)
     else:
         print("[cs_owner] chưa cấu hình PALFISH_CS_SYNC_URL/KEY -> giữ GVCN như cũ", flush=True)
+    # Chỉ bật luật 'để trống' khi có owner thật -> endpoint 0 owner thì KHÔNG xoá cột.
+    owner_live = owner_display_on(profiles, [k["uid"] for k in kept], owner_on)
+    if owner_on and not owner_live:
+        print("[cs_owner] 0 owner (sai secret / endpoint lỗi?) -> giữ head_teacher, "
+              "KHÔNG xoá cột GVCN lượt này", flush=True)
 
     need_gvcn = [k["uid"] for k in kept if not _p(k["uid"])["gvcn"]][:gvcn_limit]
     week_uids = [k["uid"] for k in kept if k.get("week_rows")]   # bé hiện trong tab tuần
@@ -968,8 +982,8 @@ def main():
     # Đọc ghi chú CS 1 lần (dò cột theo tên header) rồi dùng cho cả sheet + log.
     care_cs = read_cs_notes(svc, sheet_id, SHEET_CARE, 4, 5)   # header dòng 4, data dòng 5
     wait_cs = read_cs_notes(svc, sheet_id, SHEET_WAITING, 1, 2)
-    write_sheet(svc, sheet_id, tabs, kept, profiles, care_cs, wait_cs, owner_on)
-    write_log(svc, sheet_id, tabs, kept, profiles, care_cs, owner_on)
+    write_sheet(svc, sheet_id, tabs, kept, profiles, care_cs, wait_cs, owner_live)
+    write_log(svc, sheet_id, tabs, kept, profiles, care_cs, owner_live)
     write_health(svc, sheet_id, "OK",
                  f"Quét {len(to_scan)} bé · pool còn {len(new_pool)} đang chờ · "
                  f"{kept_week} bé có buổi tuần này ({kept_today} hôm nay).")
